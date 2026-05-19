@@ -647,6 +647,43 @@ def test_orchestrate_repo_flag_selects_supported_repo_profile():
     )
 
 
+def test_orchestrate_message_becomes_initial_solver_guidance():
+    captured = {}
+
+    class FakeEvaluator:
+        def __init__(self, **kwargs):
+            pass
+
+    class FakeOrchestrator:
+        def __init__(self, config, **kwargs):
+            captured["config"] = config
+
+        async def run(self):
+            return []
+
+    with (
+        patch("ptq.config.load_config", return_value=_fake_orchestrate_config()),
+        patch("ptq.evaluator.Evaluator", FakeEvaluator),
+        patch("ptq.orchestrator.Orchestrator", FakeOrchestrator),
+    ):
+        result = runner.invoke(
+            app,
+            [
+                "orchestrate",
+                "--issue",
+                "123",
+                "-m",
+                "Start by checking optimizer state restoration.",
+            ],
+        )
+
+    assert result.exit_code == 0, result.output
+    assert (
+        captured["config"].initial_message
+        == "Start by checking optimizer state restoration."
+    )
+
+
 def test_orchestrate_infers_repo_from_configured_github_repo():
     captured = {}
     cfg = _fake_orchestrate_config()

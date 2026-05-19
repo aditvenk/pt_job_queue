@@ -110,6 +110,7 @@ class Orchestrator:
                     "iteration_start",
                     issue=issue.number,
                     iteration=iteration,
+                    initial_message=self.config.initial_message,
                     previous_review=review.to_dict() if review else None,
                     pr_feedback=pr_feedback,
                 )
@@ -252,7 +253,7 @@ class Orchestrator:
         request = RunRequest(
             issue_data=issue.raw,
             issue_number=issue.number,
-            message=None,
+            message=self.config.initial_message,
             machine=None if self.config.local else self.config.machine,
             local=self.config.local,
             follow=False,

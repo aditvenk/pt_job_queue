@@ -192,6 +192,7 @@ def test_launch_solver_uses_configured_repo_profile(tmp_path):
             issue_selection_prompt="open bugs",
             repo="torchtitan",
             github_repo="pytorch/torchtitan",
+            initial_message="Check checkpoint load order first.",
             log_path=tmp_path / "runs.jsonl",
         ),
         job_repo=FakeJobRepo(),
@@ -210,6 +211,7 @@ def test_launch_solver_uses_configured_repo_profile(tmp_path):
     assert job_id == "job-1"
     assert captured["find_by_issue"]["repo"] == "torchtitan"
     assert captured["request"].repo == "torchtitan"
+    assert captured["request"].message == "Check checkpoint load order first."
 
 
 def test_pr_feedback_snapshot_includes_failing_ci():

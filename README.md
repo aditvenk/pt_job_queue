@@ -74,6 +74,12 @@ uv run ptq orchestrate --issue 166156 --machine localhost
 # Run one explicit issue from another supported repo profile.
 uv run ptq orchestrate --repo torchtitan --issue 1234 --machine localhost
 
+# Run one explicit issue with initial solver guidance.
+uv run ptq orchestrate \
+  --issue 166156 \
+  --machine localhost \
+  -m "Start by checking whether the wrapper drops custom tensor metadata."
+
 # Run one explicit issue and update/create a draft PR after approval.
 uv run ptq orchestrate --issue 166156 --machine localhost --pr
 
@@ -100,6 +106,7 @@ Useful flags:
 | `--repo NAME` | PTQ repo profile to run against, such as `pytorch` or `torchtitan`; default comes from config. |
 | `--issue N` | Run one explicit issue in the selected repo. |
 | `--prompt TEXT` | Natural-language GitHub issue selection criteria. |
+| `--message/-m TEXT` | Initial solver guidance to include alongside the issue. |
 | `--parallel N` | Number of concurrent solver/evaluator loops. |
 | `--max-iterations N` | Max solver/evaluator iterations per issue. |
 | `--machine NAME` | Remote machine, or `localhost`/`local` for local worktrees. |

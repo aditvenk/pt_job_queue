@@ -1073,6 +1073,14 @@ def orchestrate(
         int | None,
         typer.Option(help="Run the orchestrator on one explicit GitHub issue."),
     ] = None,
+    message: Annotated[
+        str | None,
+        typer.Option(
+            "--message",
+            "-m",
+            help="Initial solver guidance to include alongside the issue.",
+        ),
+    ] = None,
     dry_run: Annotated[
         bool,
         typer.Option("--dry-run", help="Select issues without launching agents."),
@@ -1156,6 +1164,7 @@ def orchestrate(
         solver_model=model,
         solver_thinking=thinking,
         solver_max_turns=cfg.default_max_turns,
+        initial_message=message,
         push_pr=push_pr,
     )
 

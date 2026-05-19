@@ -32,6 +32,7 @@ class OrchestratorConfig:
     solver_model: str = "opus"
     solver_thinking: str | None = None
     solver_max_turns: int = 100
+    initial_message: str | None = None
     push_pr: bool = False
     log_path: Path = Path.home() / ".ptq" / "orchestrator" / "runs.jsonl"
 
