@@ -276,6 +276,9 @@ class Orchestrator:
             self.job_repo,
             backend,
             request,
+            on_progress=lambda msg: self._progress(
+                f"#{issue.number}: solver setup: {msg}"
+            ),
         )
         self._job_launch_times[job_id] = launched_after
         return job_id

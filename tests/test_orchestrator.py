@@ -183,9 +183,13 @@ def test_launch_solver_uses_configured_repo_profile(tmp_path):
             assert cmd == "date +%s"
             return CompletedProcess("", 0, "123\n", "")
 
-    def fake_launch(job_repo, backend, request):
+    def fake_launch(job_repo, backend, request, *, on_progress=None):
         captured["request"] = request
+        assert on_progress is not None
+        on_progress("Creating per-job venv...")
         return "job-1"
+
+    progress_messages = []
 
     orchestrator = Orchestrator(
         OrchestratorConfig(
@@ -196,6 +200,7 @@ def test_launch_solver_uses_configured_repo_profile(tmp_path):
             log_path=tmp_path / "runs.jsonl",
         ),
         job_repo=FakeJobRepo(),
+        on_progress=progress_messages.append,
     )
     with (
         patch("ptq.orchestrator.orchestrator.create_backend", return_value=FakeBackend()),
@@ -212,6 +217,7 @@ def test_launch_solver_uses_configured_repo_profile(tmp_path):
     assert captured["find_by_issue"]["repo"] == "torchtitan"
     assert captured["request"].repo == "torchtitan"
     assert captured["request"].message == "Check checkpoint load order first."
+    assert progress_messages == ["#123: solver setup: Creating per-job venv..."]
 
 
 def test_pr_feedback_snapshot_includes_failing_ci():
