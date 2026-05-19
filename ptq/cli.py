@@ -1059,9 +1059,6 @@ def orchestrate(
         str | None,
         typer.Option(help="Machine to run on; localhost/local runs locally."),
     ] = None,
-    max_issues: Annotated[
-        int | None, typer.Option(help="Maximum issues to select.")
-    ] = None,
     max_iterations: Annotated[
         int | None, typer.Option(help="Maximum hill-climbing iterations per issue.")
     ] = None,
@@ -1074,15 +1071,12 @@ def orchestrate(
         typer.Option("--dry-run", help="Select issues without launching agents."),
     ] = False,
     follow: Annotated[
-        bool | None,
+        bool,
         typer.Option(
             "--follow/--no-follow",
-            help=(
-                "Stream solver output while waiting. Defaults on for a single "
-                "issue with parallel=1."
-            ),
+            help="Stream solver output while waiting.",
         ),
-    ] = None,
+    ] = True,
     poll_seconds: Annotated[
         float,
         typer.Option(
@@ -1119,13 +1113,9 @@ def orchestrate(
     agent = cfg.default_agent
     model = cfg.effective_model(agent)
     thinking = cfg.effective_thinking(agent)
-    max_issues_value = int(max_issues or orch.get("max_issues", 20))
+    max_issues_value = 1 if issue is not None else int(orch.get("max_issues", 20))
     parallel_value = int(parallel or orch.get("parallel", 4))
-    stream_solver = (
-        bool(follow)
-        if follow is not None
-        else issue is not None and max_issues_value == 1 and parallel_value == 1
-    )
+    stream_solver = bool(follow)
 
     config = OrchestratorConfig(
         issue_selection_prompt=issue_prompt,

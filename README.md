@@ -26,7 +26,6 @@ uv run ptq setup --local
 # Dry-run issue selection without launching agents.
 uv run ptq orchestrate \
   --issue 76449 \
-  --max-issues 1 \
   --parallel 1 \
   --machine localhost \
   --dry-run
@@ -34,11 +33,9 @@ uv run ptq orchestrate \
 # Run one issue through one solver/evaluator iteration.
 uv run ptq orchestrate \
   --issue 76449 \
-  --max-issues 1 \
   --parallel 1 \
   --max-iterations 1 \
-  --machine localhost \
-  --follow
+  --machine localhost
 ```
 
 If the issue is approved and you want PTQ to push or update a draft PR, add
@@ -47,10 +44,8 @@ If the issue is approved and you want PTQ to push or update a draft PR, add
 ```bash
 uv run ptq orchestrate \
   --issue 76449 \
-  --max-issues 1 \
   --parallel 1 \
   --machine localhost \
-  --follow \
   --pr
 ```
 
@@ -71,24 +66,26 @@ Examples:
 
 ```bash
 # Run one explicit issue.
-uv run ptq orchestrate --issue 166156 --machine localhost --follow
+uv run ptq orchestrate --issue 166156 --machine localhost
 
 # Run one explicit issue and update/create a draft PR after approval.
-uv run ptq orchestrate --issue 166156 --machine localhost --follow --pr
+uv run ptq orchestrate --issue 166156 --machine localhost --pr
 
 # Select issues from natural-language criteria.
 uv run ptq orchestrate \
   --prompt "open issues labeled 'module: nn' with a repro script" \
-  --max-issues 10 \
   --parallel 4 \
   --machine my-gpu-box
 
 # Preview what would be selected.
 uv run ptq orchestrate \
   --prompt "good first issue bugs mentioning incorrect output" \
-  --max-issues 5 \
   --dry-run
 ```
+
+Prompt-based selection uses `[orchestrator].max_issues` from
+`~/.ptq/config.toml` as the selection cap. Explicit `--issue` runs always select
+one issue.
 
 Useful flags:
 
@@ -96,14 +93,13 @@ Useful flags:
 | --- | --- |
 | `--issue N` | Run one explicit PyTorch issue. |
 | `--prompt TEXT` | Natural-language GitHub issue selection criteria. |
-| `--max-issues N` | Maximum issues to select. |
 | `--parallel N` | Number of concurrent solver/evaluator loops. |
 | `--max-iterations N` | Max solver/evaluator iterations per issue. |
 | `--machine NAME` | Remote machine, or `localhost`/`local` for local worktrees. |
-| `--follow` | Stream solver activity in the orchestrator console. |
+| `--follow/--no-follow` | Stream solver activity in the orchestrator console; default is `--follow`. |
 | `--poll-seconds N` | Poll interval while waiting on solver jobs. |
 | `--dry-run` | Select issues without launching solver jobs. |
-| `--pr` | Push/create or update a draft PR after approval. |
+| `--pr` | Push/create or update a draft PR after approval; default is no PR push. |
 
 View orchestrator history:
 
@@ -228,7 +224,7 @@ change, not the original GitHub issue title and not an issue-number reference.
 Example:
 
 ```bash
-uv run ptq orchestrate --issue 166156 --machine localhost --follow --pr
+uv run ptq orchestrate --issue 166156 --machine localhost --pr
 ```
 
 PR description format:
@@ -265,10 +261,8 @@ Rerun example:
 ```bash
 uv run ptq orchestrate \
   --issue 166156 \
-  --max-issues 1 \
   --parallel 1 \
   --machine localhost \
-  --follow \
   --pr
 ```
 
@@ -304,7 +298,7 @@ review comments from other bots are preserved.
 
 ## Watching Solver Progress
 
-`--follow` streams solver events through the orchestrator for single-issue runs.
+`--follow` streams solver events through the orchestrator and is enabled by default.
 You can also inspect a job directly:
 
 ```bash

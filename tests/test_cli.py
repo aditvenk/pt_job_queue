@@ -527,3 +527,119 @@ def test_evaluate_command_builds_solver_output_and_writes_review(tmp_path):
     assert result.exit_code == 0, result.output
     assert '"verdict": "approved"' in result.output
     assert writes
+
+
+def _fake_orchestrate_config():
+    return type(
+        "Cfg",
+        (),
+        {
+            "orchestrator": {
+                "github_repo": "pytorch/pytorch",
+                "issue_selection_prompt": "open bugs",
+                "max_issues": 7,
+                "parallel": 3,
+                "max_iterations": 4,
+                "approval_threshold": 0.8,
+                "machine": "localhost",
+            },
+            "evaluator": {
+                "approval_threshold": 0.8,
+                "shelve_threshold": 0.3,
+                "max_iterations": 4,
+            },
+            "default_agent": "claude",
+            "default_max_turns": 100,
+            "effective_model": staticmethod(lambda agent: "opus"),
+            "effective_thinking": staticmethod(lambda agent: None),
+        },
+    )()
+
+
+def test_orchestrate_defaults_follow_on_and_pr_off():
+    captured = {}
+
+    class FakeEvaluator:
+        def __init__(self, **kwargs):
+            pass
+
+    class FakeOrchestrator:
+        def __init__(self, config, **kwargs):
+            captured["config"] = config
+            captured["stream_solver"] = kwargs["stream_solver"]
+
+        async def run(self):
+            return []
+
+    with (
+        patch("ptq.config.load_config", return_value=_fake_orchestrate_config()),
+        patch("ptq.evaluator.Evaluator", FakeEvaluator),
+        patch("ptq.orchestrator.Orchestrator", FakeOrchestrator),
+    ):
+        result = runner.invoke(app, ["orchestrate", "--issue", "123"])
+
+    assert result.exit_code == 0, result.output
+    assert captured["stream_solver"] is True
+    assert captured["config"].push_pr is False
+    assert captured["config"].max_issues == 1
+
+
+def test_orchestrate_no_follow_and_pr_flag():
+    captured = {}
+
+    class FakeEvaluator:
+        def __init__(self, **kwargs):
+            pass
+
+    class FakeOrchestrator:
+        def __init__(self, config, **kwargs):
+            captured["config"] = config
+            captured["stream_solver"] = kwargs["stream_solver"]
+
+        async def run(self):
+            return []
+
+    with (
+        patch("ptq.config.load_config", return_value=_fake_orchestrate_config()),
+        patch("ptq.evaluator.Evaluator", FakeEvaluator),
+        patch("ptq.orchestrator.Orchestrator", FakeOrchestrator),
+    ):
+        result = runner.invoke(
+            app,
+            ["orchestrate", "--issue", "123", "--no-follow", "--pr"],
+        )
+
+    assert result.exit_code == 0, result.output
+    assert captured["stream_solver"] is False
+    assert captured["config"].push_pr is True
+
+
+def test_orchestrate_uses_config_max_issues_for_prompt_selection():
+    captured = {}
+
+    class FakeEvaluator:
+        def __init__(self, **kwargs):
+            pass
+
+    class FakeOrchestrator:
+        def __init__(self, config, **kwargs):
+            captured["config"] = config
+
+        async def run(self):
+            return []
+
+    with (
+        patch("ptq.config.load_config", return_value=_fake_orchestrate_config()),
+        patch("ptq.evaluator.Evaluator", FakeEvaluator),
+        patch("ptq.orchestrator.Orchestrator", FakeOrchestrator),
+    ):
+        result = runner.invoke(app, ["orchestrate", "--prompt", "open nn bugs"])
+
+    assert result.exit_code == 0, result.output
+    assert captured["config"].max_issues == 7
+
+
+def test_orchestrate_has_no_max_issues_flag():
+    result = runner.invoke(app, ["orchestrate", "--help"])
+    assert result.exit_code == 0, result.output
+    assert "--max-issues" not in result.output
