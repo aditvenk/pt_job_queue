@@ -191,6 +191,7 @@ status.json
     "torch/distributed/tensor/_api.py",
     "test/distributed/tensor/test_dtensor.py"
   ],
+  "pr_title": "Preserve Parameter markers in DTensor.to_local",
   "summary": "Preserve Parameter-ness when DTensor.to_local() is called on Parameter(DTensor).",
   "resolved_pr_comments": []
 }
@@ -220,6 +221,10 @@ When `--pr` is set and the evaluator approves the fix, PTQ will:
 5. Create or update a draft PR.
 6. Keep the PR in draft state.
 
+The PR title is derived from `status.json["pr_title"]` when present, otherwise
+from the solver summary/report. It should be a one-line summary of the code
+change, not the original GitHub issue title and not an issue-number reference.
+
 Example:
 
 ```bash
@@ -228,7 +233,6 @@ uv run ptq orchestrate --issue 166156 --machine localhost --follow --pr
 
 PR description format:
 
-- human note
 - agent report summary
 - root cause
 - fix

@@ -111,12 +111,14 @@ cd {workspace}/jobs/{job_id}/pytorch && git diff > {workspace}/jobs/{job_id}/fix
   "repro_passes_after_fix": true,
   "how_repro_was_run": "{workspace}/jobs/{job_id}/.venv/bin/python {workspace}/jobs/{job_id}/repro_{issue_number}.py",
   "files_changed": ["torch/nn/functional.py"],
+  "pr_title": "One-line summary of the code change, not the issue title",
   "summary": "Short root-cause and fix summary",
   "resolved_pr_comments": []
 }}
 ```
 
 Use `"repro_source": "generated"` and `"repro_file": "repro_{issue_number}_generated.py"` when you wrote the repro yourself.
+Use `pr_title` for a concise title of the fix, not the GitHub issue title and not an issue-number reference. Good examples: "Preserve Parameter markers in DTensor.to_local" or "Validate DDP parameter shapes before synchronization".
 
 If this run includes GitHub PR feedback, each feedback item has an `id`, `kind`, `author`, `body`, and usually a `url`. Feedback may come from human reviewers or review bots such as Claude; treat actionable bot feedback like human review feedback. When you have resolved a specific PR comment, include it in `resolved_pr_comments` so PTQ can reply to that exact comment after updating the draft PR:
 ```json

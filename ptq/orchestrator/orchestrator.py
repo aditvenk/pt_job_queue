@@ -212,7 +212,6 @@ class Orchestrator:
             self.job_repo,
             result.job_id,
             human_note=note,
-            title=result.issue.title,
             draft=True,
             log=lambda msg: self._progress(
                 f"#{result.issue.number}: pr: {msg}"

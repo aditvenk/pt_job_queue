@@ -267,7 +267,7 @@ def test_post_process_pushes_draft_pr_when_enabled(tmp_path):
     assert result.pr_url == "https://github.com/pytorch/pytorch/pull/123"
 
 
-def test_push_draft_pr_uses_issue_title_without_issue_number(tmp_path):
+def test_push_draft_pr_lets_pr_service_choose_title(tmp_path):
     class FakeRepo:
         pass
 
@@ -301,8 +301,7 @@ def test_push_draft_pr_uses_issue_title_without_issue_number(tmp_path):
     )
     with patch("ptq.application.pr_service.create_pr", side_effect=fake_create_pr):
         asyncio.run(orchestrator._push_draft_pr(result))
-    assert captured["title"] == "Parameter.to_local() will make parameter a normal tensor"
-    assert "#166156" not in captured["title"]
+    assert "title" not in captured
 
 
 def test_orchestrator_pr_note_excludes_evaluator_summary():
