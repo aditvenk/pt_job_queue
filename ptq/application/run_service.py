@@ -91,6 +91,31 @@ def _build_prior_context(backend: Backend, job_dir: str, run_number: int) -> str
     return "\n".join(sections)
 
 
+def _build_review_context(review_feedback_json: str | None) -> str:
+    if not review_feedback_json:
+        return ""
+    return (
+        "\n\n## Review Feedback\n"
+        "The previous solver attempt may have been reviewed by automated evaluators "
+        "or by humans on a draft GitHub PR. Treat this as structured blocking "
+        "feedback for the current run. Address blocking comments and GitHub PR "
+        "comments first, especially repro-fidelity comments, and update artifacts "
+        "when done. If you address a specific GitHub PR comment from "
+        "`github_pr_feedback.comments`, add it to `status.json` as "
+        "`resolved_pr_comments` with its `comment_id`, `kind`, and a very short "
+        "`resolution` explaining how it was fixed in one sentence. PTQ will reply to those "
+        "specific PR comments after updating the draft PR. If "
+        "`github_pr_feedback.ci_failures` is present, review the failing CI checks "
+        "and any included `failed_log_excerpt` fields. Follow linked logs when "
+        "the excerpt is insufficient. Determine whether each failure is caused "
+        "by this PR; fix PR-caused failures, and document unrelated or "
+        "infrastructure failures in `report.md`.\n\n"
+        "```json\n"
+        f"{review_feedback_json.strip()}\n"
+        "```\n"
+    )
+
+
 def launch(
     repo: JobRepository,
     backend: Backend,
@@ -243,6 +268,11 @@ def launch(
             system_prompt += prior_context
             progress("Loaded prior run context (worklog/report).")
 
+    review_context = _build_review_context(request.review_feedback_json)
+    if review_context:
+        system_prompt += review_context
+        progress("Loaded review feedback.")
+
     _stamp_worklog_header(backend, job_dir, run_number, request.message)
 
     with tempfile.NamedTemporaryFile(mode="w", suffix=".md", delete=False) as f:
@@ -263,7 +293,7 @@ def launch(
             with tempfile.NamedTemporaryFile(mode="w", suffix=".py", delete=False) as f:
                 f.write(repro)
                 repro_tmp = Path(f.name)
-            backend.copy_to(repro_tmp, f"{job_dir}/repro.py")
+            backend.copy_to(repro_tmp, f"{job_dir}/repro_{issue_number}.py")
             repro_tmp.unlink()
             progress("Extracted and uploaded repro script.")
         else:
@@ -275,6 +305,12 @@ def launch(
         agent_message = f"{DEFAULT_MESSAGE}\n\nAdditional context: {request.message}"
     else:
         agent_message = DEFAULT_MESSAGE
+
+    if request.review_feedback_json:
+        agent_message += (
+            "\n\nReview feedback is included in the system prompt. "
+            "Revise the attempt according to that feedback before finishing."
+        )
 
     log_file = f"{job_dir}/{agent.log_filename(run_number)}"
     unbuffer = "stdbuf -oL " if isinstance(backend, RemoteBackend) else ""

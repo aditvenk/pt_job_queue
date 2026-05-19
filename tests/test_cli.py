@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import tempfile
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -8,6 +9,7 @@ from typer.testing import CliRunner
 
 from ptq.cli import app
 from ptq.domain.models import JobRecord, RebaseInfo, RebaseState
+from ptq.evaluator.models import ReviewResult
 from ptq.infrastructure.job_repository import JobRepository
 
 runner = CliRunner()
@@ -129,6 +131,37 @@ class TestRunValidation:
         assert result.exit_code == 0, result.output
         request = mock_launch.call_args.args[2]
         assert request.agent_type == "codex"
+
+    def test_review_file_passed_through(self, tmp_path):
+        review_path = tmp_path / "review.json"
+        review_path.write_text('{"verdict": "needs_revision"}')
+        repo = _make_repo(tmp_path)
+
+        def fake_launch(r, b, req, **kw):
+            repo.save(JobRecord(job_id="test-job", local=True, workspace="/tmp/ws"))
+            return "test-job"
+
+        with (
+            patch("ptq.cli._repo", return_value=repo),
+            patch(
+                "ptq.application.run_service.launch", side_effect=fake_launch
+            ) as mock_launch,
+        ):
+            result = runner.invoke(
+                app,
+                [
+                    "run",
+                    "-m",
+                    "hello",
+                    "--review-file",
+                    str(review_path),
+                    "--no-follow",
+                ],
+            )
+
+        assert result.exit_code == 0, result.output
+        request = mock_launch.call_args.args[2]
+        assert request.review_feedback_json == '{"verdict": "needs_revision"}'
 
     def test_thinking_passed_through(self, tmp_path):
         repo = _make_repo(tmp_path)
@@ -412,3 +445,85 @@ class TestList:
         assert "PR" in result.output
         assert "Rebase" in result.output
         assert "#176" in result.output
+
+
+def test_evaluator_models_default_to_required_review_pair():
+    from ptq.cli import _evaluator_models
+
+    assert _evaluator_models({"model": "claude"}) == [
+        "gpt-5.5",
+        "claude-opus-4-7",
+    ]
+
+
+def test_evaluate_command_builds_solver_output_and_writes_review(tmp_path):
+    repo = _make_repo(
+        tmp_path,
+        [
+            JobRecord(
+                job_id="job-76449",
+                issue=76449,
+                local=True,
+                workspace="/tmp/ws",
+                repo="pytorch",
+            )
+        ],
+    )
+    writes: list[str] = []
+
+    class FakeBackend:
+        workspace = "/tmp/ws"
+
+        def run(self, cmd, check=True, stream=False):
+            if cmd == "cat /tmp/ws/jobs/job-76449/status.json":
+                stdout = (
+                    '{"repro_file": "repro_76449_generated.py", '
+                    '"repro_source": "generated"}'
+                )
+                return type("Result", (), {"returncode": 0, "stdout": stdout})()
+            if cmd == "cat /tmp/ws/jobs/job-76449/report.md":
+                return type("Result", (), {"returncode": 0, "stdout": "report"})()
+            if cmd == "cat /tmp/ws/jobs/job-76449/fix.diff":
+                return type("Result", (), {"returncode": 0, "stdout": "diff"})()
+            if cmd == "cat /tmp/ws/jobs/job-76449/repro_76449_generated.py":
+                return type("Result", (), {"returncode": 0, "stdout": "import torch"})()
+            if cmd.startswith("cat > /tmp/ws/jobs/job-76449/review.json"):
+                writes.append(cmd)
+                return type("Result", (), {"returncode": 0, "stdout": ""})()
+            if cmd.startswith("test -f "):
+                return type("Result", (), {"returncode": 0, "stdout": ""})()
+            return type("Result", (), {"returncode": 1, "stdout": ""})()
+
+    def fake_evaluate(self, solver_output):
+        assert solver_output.issue_number == 76449
+        assert "Issue #76449" in solver_output.issue_body
+        assert solver_output.report_md == "report"
+        assert solver_output.fix_diff == "diff"
+        assert solver_output.repro_script == "import torch"
+        return ReviewResult(
+            verdict="approved",
+            score=0.9,
+            iteration=1,
+            repro_fidelity="faithful",
+            summary="approved",
+        )
+
+    with (
+        patch("ptq.cli._repo", return_value=repo),
+        patch("ptq.infrastructure.backends.backend_for_job", return_value=FakeBackend()),
+        patch(
+            "ptq.issue.fetch_issue",
+            return_value={
+                "title": "Enhance verify",
+                "body": "body",
+                "labels": [],
+                "comments": [],
+            },
+        ),
+        patch("ptq.evaluator.Evaluator.evaluate", fake_evaluate),
+    ):
+        result = runner.invoke(app, ["evaluate", "job-76449", "--issue", "76449"])
+
+    assert result.exit_code == 0, result.output
+    assert '"verdict": "approved"' in result.output
+    assert writes

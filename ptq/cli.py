@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import time
 from pathlib import Path
@@ -55,6 +56,23 @@ def _render_event(ev: StreamEvent) -> None:
                 case "Glob":
                     console.print(
                         f"  [cyan]glob[/cyan] [dim]{inp.get('pattern', '')}[/dim]"
+                    )
+                case "ToolSearch":
+                    console.print(
+                        f"  [cyan]tool search[/cyan] [dim]{inp.get('query', '')}[/dim]"
+                    )
+                case "mcp__plugin_meta_mux__search_files":
+                    pattern = inp.get("pattern", "")
+                    dirs = inp.get("target_directories", "")
+                    console.print(
+                        f"  [cyan]search files[/cyan] [dim]{pattern} {dirs}[/dim]"
+                    )
+                case "mcp__plugin_meta_mux__knowledge_filtered_search":
+                    query = inp.get("natural_language_query") or inp.get("keywords", "")
+                    console.print(f"  [cyan]knowledge search[/cyan] [dim]{query}[/dim]")
+                case "mcp__plugin_meta_mux__knowledge_load":
+                    console.print(
+                        f"  [cyan]load[/cyan] [dim]{inp.get('url', '')}[/dim]"
                     )
                 case _:
                     console.print(f"  [dim]{ev.tool_name}[/dim]")
@@ -226,6 +244,13 @@ def run(
         Path | None,
         typer.Option("--input", "-i", help="Read task description from a file."),
     ] = None,
+    review_file: Annotated[
+        Path | None,
+        typer.Option(
+            "--review-file",
+            help="Inject evaluator feedback JSON into the solver context.",
+        ),
+    ] = None,
     name: Annotated[
         str | None,
         typer.Option("--name", "-n", help="Display name for this job."),
@@ -256,11 +281,16 @@ def run(
         if not input_file.exists():
             raise typer.BadParameter(f"File not found: {input_file}")
         message = input_file.read_text()
+    review_feedback_json = None
+    if review_file is not None:
+        if not review_file.exists():
+            raise typer.BadParameter(f"Review file not found: {review_file}")
+        review_feedback_json = review_file.read_text()
 
     from ptq.application import run_service
     from ptq.config import load_config
     from ptq.infrastructure.backends import create_backend
-    from ptq.issue import fetch_issue
+    from ptq.issue import fetch_issue, format_issue_context
 
     cfg = load_config()
     if preset:
@@ -331,6 +361,7 @@ def run(
         verbose=verbose,
         name=name,
         repo=repo,
+        review_feedback_json=review_feedback_json,
     )
 
     try:
@@ -578,6 +609,7 @@ def list_jobs() -> None:
         "[dim]  ptq run JOB_ID -m 'look at X instead' # re-run with steering[/dim]"
     )
     console.print("[dim]  ptq peek JOB_ID                       # check progress[/dim]")
+    console.print("[dim]  ptq watch JOB_ID                      # stream progress[/dim]")
     console.print("[dim]  ptq results JOB_ID                    # fetch results[/dim]")
     console.print(
         "[dim]  ptq pr JOB_ID                         # create GitHub PR[/dim]"
@@ -663,6 +695,87 @@ def peek(
 
 
 @app.command()
+def watch(
+    job_id: Annotated[str, typer.Argument(help="Job ID or issue number.")],
+    lines: Annotated[
+        int,
+        typer.Option("--lines", help="Existing log lines to show before following."),
+    ] = 80,
+    interval: Annotated[
+        float, typer.Option("--interval", help="Seconds between log checks.")
+    ] = 2.0,
+    raw: Annotated[
+        bool,
+        typer.Option("--raw", help="Print raw agent log lines instead of parsed events."),
+    ] = False,
+    exit_when_stopped: Annotated[
+        bool,
+        typer.Option(
+            "--exit-when-stopped/--keep-watching",
+            help="Exit once the tracked job stops.",
+        ),
+    ] = True,
+) -> None:
+    """Stream an existing job's agent output."""
+    from ptq.application.job_service import get_status
+    from ptq.infrastructure.backends import backend_for_job
+
+    repo = _repo()
+    try:
+        job_id = repo.resolve_id(job_id)
+    except PtqError as e:
+        _handle_error(e)
+    job = repo.get(job_id)
+    backend = backend_for_job(job)
+    agent_impl = get_agent(job.agent)
+    log_file = f"{backend.workspace}/jobs/{job_id}/{agent_impl.log_filename(job.runs)}"
+    console.print(
+        f"[bold]Watching {job_id}[/bold] "
+        f"[dim](run {job.runs}, {job.target}, {log_file})[/dim]"
+    )
+
+    def read_log() -> str:
+        result = backend.run(f"cat {log_file}", check=False)
+        return result.stdout if result.returncode == 0 else ""
+
+    text = read_log()
+    if text and lines > 0:
+        _render_log_lines(agent_impl, text.splitlines()[-lines:], raw=raw)
+    offset = len(text)
+
+    try:
+        while True:
+            job = repo.get(job_id)
+            status = get_status(job, backend)
+            text = read_log()
+            if len(text) > offset:
+                _render_log_lines(agent_impl, text[offset:].splitlines(), raw=raw)
+                offset = len(text)
+            if exit_when_stopped and status == JobStatus.STOPPED:
+                console.print(f"\n[bold]Job stopped.[/bold]  ptq results {job_id}")
+                return
+            time.sleep(interval)
+    except KeyboardInterrupt:
+        console.print("\n[bold yellow]Stopped watching; job was not killed.[/bold yellow]")
+        console.print(f"  uv run ptq peek {job_id} --log 80")
+
+
+def _render_log_lines(agent_impl, lines: list[str], *, raw: bool = False) -> None:
+    for line in lines:
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if raw:
+            console.print(stripped)
+            continue
+        try:
+            for ev in agent_impl.parse_stream_line(stripped):
+                _render_event(ev)
+        except (json.JSONDecodeError, ValueError):
+            continue
+
+
+@app.command()
 def takeover(
     job_id: Annotated[str, typer.Argument(help="Job ID or issue number.")],
 ) -> None:
@@ -701,10 +814,10 @@ def status(
         )
         if job.issue is not None:
             console.print(
-                f"  ptq run --issue {job.issue} --machine {job.target}  # to reattach"
+                f"  uv run ptq peek {job_id} --log 80  # inspect progress"
             )
         else:
-            console.print(f"  ptq run {job_id}  # to reattach")
+            console.print(f"  uv run ptq peek {job_id} --log 80  # inspect progress")
     else:
         console.print(
             f"[bold dim]stopped[/bold dim]  {job_id}  (run {job.runs}, {job.target})"
@@ -731,9 +844,15 @@ def pr(
         ),
     ] = None,
     title: Annotated[str | None, typer.Option(help="PR title override.")] = None,
-    draft: Annotated[bool, typer.Option(help="Create as draft PR.")] = False,
+    draft: Annotated[
+        bool,
+        typer.Option(
+            "--draft",
+            help="Accepted for compatibility; PRs are always created as draft.",
+        ),
+    ] = False,
 ) -> None:
-    """Create a GitHub PR from a job's worktree changes.
+    """Create a draft GitHub PR from a job's worktree changes.
 
     Requires a human note describing the change. This is embedded at the top
     of the PR body so reviewers see the author's own assessment first.
@@ -783,12 +902,307 @@ def pr(
             job_id,
             human_note=note,
             title=title,
-            draft=draft,
+            draft=True,
             log=lambda msg: console.print(f"  [dim]{msg}[/dim]"),
         )
     except PtqError as e:
         _handle_error(e)
     console.print(f"\n[bold green]PR created:[/bold green] {result.url}")
+
+
+def _latest_job_for_issue(issue: int, repo) -> str | None:
+    matches = [
+        job_id
+        for job_id, job in repo.list_all().items()
+        if job.issue == issue and job.repo == "pytorch"
+    ]
+    return sorted(matches)[-1] if matches else None
+
+
+def _backend_text(backend, path: str) -> str:
+    result = backend.run(f"cat {path}", check=False)
+    return result.stdout if result.returncode == 0 else ""
+
+
+def _evaluator_models(evaluator_section: dict) -> list[str]:
+    raw_models = evaluator_section.get("models")
+    if isinstance(raw_models, list):
+        models = [str(model).strip() for model in raw_models if str(model).strip()]
+        if models:
+            return models
+    return ["gpt-5.5", "claude-opus-4-7"]
+
+
+def _print_orchestrate_results(results) -> None:
+    for result in results:
+        issue_number = result.issue.number
+        verdict = result.verdict
+        score = result.score
+        iterations = result.iterations
+        job_id = result.job_id or "-"
+        branch = result.branch or "-"
+        pr_url = getattr(result, "pr_url", None)
+        pr_text = f" pr={pr_url}" if pr_url else ""
+        console.print(
+            f"#{issue_number} {verdict} "
+            f"score={score:.2f} iterations={iterations} "
+            f"job={job_id} branch={branch}{pr_text}"
+        )
+
+
+@app.command()
+def evaluate(
+    job_id: Annotated[
+        str | None, typer.Argument(help="Job ID to evaluate.")
+    ] = None,
+    issue: Annotated[int | None, typer.Option(help="GitHub issue number.")] = None,
+) -> None:
+    """Run the evaluator against an existing solver job."""
+    from ptq.config import load_config
+    from ptq.evaluator import Evaluator, SolverOutput
+    from ptq.infrastructure.backends import backend_for_job
+    from ptq.issue import fetch_issue, format_issue_context
+    from ptq.repo_profiles import get_profile
+
+    cfg = load_config()
+    repo = _repo()
+    if job_id is None:
+        if issue is None:
+            raise typer.BadParameter("Provide a JOB_ID or --issue.")
+        job_id = _latest_job_for_issue(issue, repo)
+        if job_id is None:
+            raise typer.BadParameter(f"No job found for issue #{issue}.")
+    else:
+        try:
+            job_id = repo.resolve_id(job_id)
+        except PtqError as e:
+            _handle_error(e)
+
+    job = repo.get(job_id)
+    issue_number = issue or job.issue
+    if issue_number is None:
+        raise typer.BadParameter("Cannot evaluate an adhoc job without --issue.")
+
+    backend = backend_for_job(job)
+    profile = get_profile(job.repo)
+    job_dir = f"{backend.workspace}/jobs/{job_id}"
+    issue_data = fetch_issue(issue_number, repo=profile.github_repo)
+    status_text = _backend_text(backend, f"{job_dir}/status.json")
+    try:
+        status_json = json.loads(status_text) if status_text.strip() else {}
+    except json.JSONDecodeError:
+        status_json = {}
+
+    repro_filename = str(status_json.get("repro_file") or "")
+    if not repro_filename:
+        for candidate in (
+            f"repro_{issue_number}.py",
+            f"repro_{issue_number}_generated.py",
+            "repro.py",
+        ):
+            exists = backend.run(
+                f"test -f {job_dir}/{candidate}", check=False
+            ).returncode
+            if exists == 0:
+                repro_filename = candidate
+                break
+
+    evaluator_section = cfg.evaluator
+    evaluator = Evaluator(
+        reviewer_models=_evaluator_models(evaluator_section),
+        approval_threshold=float(evaluator_section.get("approval_threshold", 0.8)),
+        shelve_threshold=float(evaluator_section.get("shelve_threshold", 0.3)),
+        max_iterations=int(evaluator_section.get("max_iterations", 5)),
+    )
+    worktree_path = None
+    if job.local:
+        worktree_path = (
+            Path(job_dir.replace("~", str(Path.home()))) / profile.dir_name
+        )
+
+    review = evaluator.evaluate(
+        SolverOutput(
+            issue_number=issue_number,
+            issue_body=format_issue_context(issue_data, issue_number),
+            iteration=job.runs,
+            report_md=_backend_text(backend, f"{job_dir}/report.md"),
+            fix_diff=_backend_text(backend, f"{job_dir}/fix.diff"),
+            repro_script=(
+                _backend_text(backend, f"{job_dir}/{repro_filename}")
+                if repro_filename
+                else ""
+            ),
+            repro_filename=repro_filename,
+            status_json=status_json,
+            worktree_path=worktree_path,
+        )
+    )
+
+    review_text = json.dumps(review.to_dict(), indent=2)
+    backend.run(
+        f"cat > {job_dir}/review.json << 'PTQ_REVIEW_EOF'\n{review_text}\nPTQ_REVIEW_EOF"
+    )
+    console.print(review_text)
+
+
+@app.command()
+def orchestrate(
+    prompt: Annotated[
+        str | None,
+        typer.Option(
+            "--prompt",
+            help="Natural-language GitHub issue selection criteria.",
+        ),
+    ] = None,
+    parallel: Annotated[int | None, typer.Option(help="Concurrent solver jobs.")] = None,
+    machine: Annotated[
+        str | None,
+        typer.Option(help="Machine to run on; localhost/local runs locally."),
+    ] = None,
+    max_issues: Annotated[
+        int | None, typer.Option(help="Maximum issues to select.")
+    ] = None,
+    max_iterations: Annotated[
+        int | None, typer.Option(help="Maximum hill-climbing iterations per issue.")
+    ] = None,
+    issue: Annotated[
+        int | None,
+        typer.Option(help="Run the orchestrator on one explicit GitHub issue."),
+    ] = None,
+    dry_run: Annotated[
+        bool,
+        typer.Option("--dry-run", help="Select issues without launching agents."),
+    ] = False,
+    follow: Annotated[
+        bool | None,
+        typer.Option(
+            "--follow/--no-follow",
+            help=(
+                "Stream solver output while waiting. Defaults on for a single "
+                "issue with parallel=1."
+            ),
+        ),
+    ] = None,
+    poll_seconds: Annotated[
+        float,
+        typer.Option(
+            "--poll-seconds",
+            help="Seconds between solver status checks.",
+        ),
+    ] = 5.0,
+    push_pr: Annotated[
+        bool,
+        typer.Option(
+            "--pr",
+            help="After approval, push/create or update a draft GitHub PR.",
+        ),
+    ] = False,
+) -> None:
+    """Run the issue-selection, solver, evaluator hill-climbing loop."""
+    from ptq.config import load_config
+    from ptq.evaluator import Evaluator
+    from ptq.orchestrator import Orchestrator, OrchestratorConfig
+
+    cfg = load_config()
+    orch = cfg.orchestrator
+    evaluator_cfg = cfg.evaluator
+    issue_prompt = (
+        f"https://github.com/{orch.get('github_repo', 'pytorch/pytorch')}/issues/{issue}"
+        if issue is not None
+        else prompt or str(orch.get("issue_selection_prompt") or "")
+    )
+    if not issue_prompt:
+        raise typer.BadParameter(
+            "Provide --prompt or set [orchestrator].issue_selection_prompt."
+        )
+
+    agent = cfg.default_agent
+    model = cfg.effective_model(agent)
+    thinking = cfg.effective_thinking(agent)
+    max_issues_value = int(max_issues or orch.get("max_issues", 20))
+    parallel_value = int(parallel or orch.get("parallel", 4))
+    stream_solver = (
+        bool(follow)
+        if follow is not None
+        else issue is not None and max_issues_value == 1 and parallel_value == 1
+    )
+
+    config = OrchestratorConfig(
+        issue_selection_prompt=issue_prompt,
+        github_repo=str(orch.get("github_repo", "pytorch/pytorch")),
+        max_issues=max_issues_value,
+        parallel=parallel_value,
+        max_iterations=int(max_iterations or orch.get("max_iterations", 5)),
+        approval_threshold=float(orch.get("approval_threshold", 0.8)),
+        machine=str(machine or orch.get("machine", "localhost")),
+        dry_run=dry_run,
+        solver_agent=agent,
+        solver_model=model,
+        solver_thinking=thinking,
+        solver_max_turns=cfg.default_max_turns,
+        push_pr=push_pr,
+    )
+
+    evaluator = Evaluator(
+        reviewer_models=_evaluator_models(evaluator_cfg),
+        approval_threshold=float(evaluator_cfg.get("approval_threshold", 0.8)),
+        shelve_threshold=float(evaluator_cfg.get("shelve_threshold", 0.3)),
+        max_iterations=int(evaluator_cfg.get("max_iterations", config.max_iterations)),
+    )
+    try:
+        orchestrator = Orchestrator(
+            config,
+            evaluator=evaluator,
+            on_progress=lambda msg: console.print(f"[dim]orchestrate:[/dim] {msg}"),
+            on_solver_event=lambda _job_id, event: _render_event(event),
+            stream_solver=stream_solver,
+            poll_seconds=poll_seconds,
+        )
+        results = asyncio.run(orchestrator.run())
+    except PtqError as e:
+        _handle_error(e)
+    _print_orchestrate_results(results)
+
+
+@app.command("orchestrate-results")
+def orchestrate_results(
+    log_path: Annotated[
+        Path | None,
+        typer.Option(help="Path to orchestrator JSONL log."),
+    ] = None,
+) -> None:
+    """Show orchestrator results/history."""
+    from rich.table import Table
+
+    from ptq.orchestrator.reporter import read_results
+
+    path = log_path or (Path.home() / ".ptq" / "orchestrator" / "runs.jsonl")
+    rows = read_results(path)
+    table = Table(show_header=True, header_style="bold", pad_edge=False)
+    table.add_column("Event")
+    table.add_column("Issue")
+    table.add_column("Verdict")
+    table.add_column("Score", justify="right")
+    table.add_column("Job")
+    table.add_column("Branch")
+    for row in rows[-50:]:
+        result = row.get("result", {}) if isinstance(row.get("result"), dict) else {}
+        issue = (
+            result.get("issue", {}) if isinstance(result.get("issue"), dict) else {}
+        )
+        review = (
+            result.get("review", {}) if isinstance(result.get("review"), dict) else {}
+        )
+        table.add_row(
+            str(row.get("event", "")),
+            str(issue.get("number") or row.get("issue") or ""),
+            str(result.get("verdict") or review.get("verdict") or ""),
+            str(result.get("score") or review.get("score") or ""),
+            str(result.get("job_id") or row.get("job_id") or ""),
+            str(result.get("branch") or ""),
+        )
+    console.print(table)
+    console.print(f"[dim]{path}[/dim]")
 
 
 @app.command()

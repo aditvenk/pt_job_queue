@@ -62,11 +62,12 @@ CUDA_LAUNCH_BLOCKING=1 PYTORCH_NO_CUDA_MEMORY_CACHING=1 compute-sanitizer --tool
 ## Instructions
 
 ### 1. Reproduce
-- If a repro script exists at `{workspace}/jobs/{job_id}/repro.py`, run it:
+- If a repro script exists at `{workspace}/jobs/{job_id}/repro_{issue_number}.py`, it was extracted from the issue. Run it unchanged:
   ```
-  {workspace}/jobs/{job_id}/.venv/bin/python {workspace}/jobs/{job_id}/repro.py
+  {workspace}/jobs/{job_id}/.venv/bin/python {workspace}/jobs/{job_id}/repro_{issue_number}.py
   ```
-- If no repro script exists, write one based on the issue description and run it.
+- If no issue-extracted repro script exists, write an agent-generated repro based on the issue description at `{workspace}/jobs/{job_id}/repro_{issue_number}_generated.py` and run it.
+- Do not use `repro.py` for new work. Use the naming convention above so the evaluator can tell whether the repro came from the issue or from you.
 - **You MUST confirm you can reproduce the reported failure before moving on.** If the repro script passes (no error), try adjusting it (different inputs, flags, or environment) to trigger the failure. If you still cannot reproduce it after reasonable attempts, stop and document in `report.md` that the issue could not be reproduced on this machine, including the hardware, PyTorch version, and what you tried. Do NOT attempt a fix for a bug you cannot observe.
 
 ### 2. Investigate
@@ -99,6 +100,58 @@ Write these files to `{workspace}/jobs/{job_id}/`:
 cd {workspace}/jobs/{job_id}/pytorch && git diff > {workspace}/jobs/{job_id}/fix.diff
 ```
 
-If you made code changes, run `spin fixlint` from `{workspace}/jobs/{job_id}/pytorch/` before generating `fix.diff` and before finishing.
+**status.json** — Write structured machine-readable status before finishing:
+```json
+{{
+  "state": "ready_for_review",
+  "iteration": 1,
+  "repro_source": "from_issue",
+  "repro_file": "repro_{issue_number}.py",
+  "repro_passes_before_fix": false,
+  "repro_passes_after_fix": true,
+  "how_repro_was_run": "{workspace}/jobs/{job_id}/.venv/bin/python {workspace}/jobs/{job_id}/repro_{issue_number}.py",
+  "files_changed": ["torch/nn/functional.py"],
+  "summary": "Short root-cause and fix summary",
+  "resolved_pr_comments": []
+}}
+```
 
-IMPORTANT: Always generate both report.md and fix.diff before finishing.
+Use `"repro_source": "generated"` and `"repro_file": "repro_{issue_number}_generated.py"` when you wrote the repro yourself.
+
+If this run includes GitHub PR feedback, each feedback item has an `id`, `kind`, `body`, and usually a `url`. When you have resolved a specific human PR comment, include it in `resolved_pr_comments` so PTQ can reply to that exact comment after updating the draft PR:
+```json
+{{
+  "resolved_pr_comments": [
+    {{
+      "comment_id": 123456789,
+      "kind": "inline",
+      "resolution": "Added no_grad coverage and preserved the parameter marker in that path."
+    }}
+  ]
+}}
+```
+Only list comments that are actually addressed by this run. Keep each `resolution` to one short sentence; put detailed analysis in `report.md`, not in the PR comment reply. Do not include evaluator comments here; use this field for GitHub PR comments from human reviewers.
+
+If this run includes failing GitHub PR checks in `github_pr_feedback.ci_failures`, review the failing check names, descriptions, links, and any included `failed_log_excerpt` fields before changing code. Follow the linked logs if the excerpt is insufficient. Decide whether each failure is caused by this PR. Fix PR-caused CI failures before finishing. If a failure is unrelated, flaky, or caused by CI infrastructure, do not make speculative unrelated changes; document the reason in `report.md` under Test results.
+
+If you cannot reproduce the issue, exit early and still write `report.md`, an empty `fix.diff`, and `status.json`:
+```json
+{{
+  "state": "not_reproducible",
+  "iteration": 1,
+  "repro_source": "generated",
+  "repro_file": "repro_{issue_number}_generated.py",
+  "repro_passes_before_fix": true,
+  "repro_passes_after_fix": null,
+  "files_changed": [],
+  "summary": "Could not reproduce the reported failure",
+  "resolved_pr_comments": [],
+  "how_repro_was_run": "{workspace}/jobs/{job_id}/.venv/bin/python {workspace}/jobs/{job_id}/repro_{issue_number}_generated.py",
+  "expected_error_from_issue": "Paste the reporter's expected error/traceback here",
+  "actual_behavior_observed": "The script completed successfully"
+}}
+```
+
+If you made code changes, run `spin fixlint` from `{workspace}/jobs/{job_id}/pytorch/` before generating `fix.diff` and before finishing. If lint setup or lint execution fails because of missing tools, dependency downloads, proxy/network failures, or unrelated lint infrastructure issues, do not abandon the run. Record the exact lint command and failure in `report.md`, include any useful stderr in the test results section, then still generate `fix.diff` and `status.json`.
+
+IMPORTANT: Always generate report.md, fix.diff, and status.json before finishing.

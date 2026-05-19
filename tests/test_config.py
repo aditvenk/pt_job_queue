@@ -51,6 +51,18 @@ class TestParse:
         cfg = _parse({})
         assert cfg.build_env == {"USE_NINJA": "1", "USE_NNPACK": "0"}
 
+    def test_evaluator_models(self):
+        cfg = _parse(
+            {
+                "evaluator": {
+                    "models": ["gpt-5.5", "claude-opus-4-7"],
+                    "approval_threshold": 0.85,
+                }
+            }
+        )
+        assert cfg.evaluator["models"] == ["gpt-5.5", "claude-opus-4-7"]
+        assert cfg.evaluator["approval_threshold"] == 0.85
+
     def test_prompt_library_overrides_and_appends(self):
         cfg = _parse(
             {

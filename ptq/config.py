@@ -77,6 +77,21 @@ USE_NNPACK = "0"
 # Uncomment to skip building NCCL from source (~5 min savings).
 # Requires NCCL installed system-wide (e.g. via apt install libnccl-dev).
 # USE_SYSTEM_NCCL = "1"
+
+[orchestrator]
+github_repo = "pytorch/pytorch"
+issue_selection_prompt = "open issues labeled 'module: nn' with a repro script, filed in the last 30 days"
+max_issues = 20
+parallel = 4
+max_iterations = 5
+approval_threshold = 0.8
+machine = "localhost"
+
+[evaluator]
+models = ["gpt-5.5", "claude-opus-4-7"]
+approval_threshold = 0.8
+shelve_threshold = 0.3
+max_iterations = 5
 """
 
 
@@ -258,6 +273,8 @@ class Config:
         }
     )
     repos_raw: dict = field(default_factory=dict)
+    orchestrator: dict = field(default_factory=dict)
+    evaluator: dict = field(default_factory=dict)
 
     def models_for(self, agent: str) -> AgentModels:
         return self.agent_models.get(agent, AgentModels(available=[], default=""))
@@ -369,6 +386,8 @@ def _parse(data: dict) -> Config:
         prompt_presets=prompt_presets,
         build_env=build_env,
         repos_raw=repos_raw,
+        orchestrator=data.get("orchestrator", {}),
+        evaluator=data.get("evaluator", {}),
     )
 
 

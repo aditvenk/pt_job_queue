@@ -68,6 +68,6 @@ Write these files to `{workspace}/jobs/{job_id}/`:
 cd {workspace}/jobs/{job_id}/pytorch && git diff > {workspace}/jobs/{job_id}/fix.diff
 ```
 
-If you made code changes, run `spin fixlint` from `{workspace}/jobs/{job_id}/pytorch/` before generating `fix.diff` and before finishing.
+If you made code changes, run `spin fixlint` from `{workspace}/jobs/{job_id}/pytorch/` before generating `fix.diff` and before finishing. If lint setup or lint execution fails because of missing tools, dependency downloads, proxy/network failures, or unrelated lint infrastructure issues, record the exact command and failure in `report.md`, then still generate `fix.diff`.
 
 IMPORTANT: Always generate report.md before finishing. Generate fix.diff if you made any code changes.

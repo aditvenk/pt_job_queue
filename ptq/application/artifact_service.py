@@ -8,7 +8,7 @@ from ptq.domain.models import PtqError
 from ptq.infrastructure.backends import backend_for_job
 from ptq.infrastructure.job_repository import JobRepository
 
-ARTIFACTS = ["report.md", "fix.diff", "worklog.md", "repro.py"]
+ARTIFACTS = ["report.md", "fix.diff", "worklog.md", "status.json", "review.json", "repro.py"]
 
 
 def fetch_results(
@@ -22,7 +22,13 @@ def fetch_results(
     dest = output_dir or (Path.home() / ".ptq" / "results" / job_id)
     dest.mkdir(parents=True, exist_ok=True)
 
-    artifacts = [*ARTIFACTS, f"agent_logs/{job.agent}-{job.runs}.log"]
+    issue_repros: list[str] = []
+    if job.issue is not None:
+        issue_repros = [
+            f"repro_{job.issue}.py",
+            f"repro_{job.issue}_generated.py",
+        ]
+    artifacts = [*ARTIFACTS, *issue_repros, f"agent_logs/{job.agent}-{job.runs}.log"]
     fetched: list[str] = []
     missing: list[str] = []
     for artifact in artifacts:

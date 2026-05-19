@@ -119,6 +119,9 @@ uv run ptq run --issue 174923 --machine my-gpu-box --agent cursor --model gpt-5.
 
 # Use first-class thinking control when the backend supports it
 uv run ptq run --agent pi --model openai-codex/gpt-5.5 --thinking high -m "triage the repro"
+
+# Re-run with evaluator feedback
+uv run ptq run 20260214-174923 --review-file review.json
 ```
 
 The agent will:
@@ -126,11 +129,43 @@ The agent will:
 2. Read pytorch source to find the root cause
 3. Apply a minimal Python-only fix
 4. Test the fix by copying edits to site-packages and re-running the repro
-5. Write `report.md` and `fix.diff`
+5. Write `report.md`, `fix.diff`, and `status.json`
 
 Re-running the same issue reuses the existing worktree and preserves prior edits. Each run gets its own log (`claude-1.log`, `claude-2.log`, ...). Different issues run concurrently via separate git worktrees. Fresh workspaces still need an explicit `ptq setup ...` first.
 
-### 4. Web dashboard
+### 4. Agentic issue loop
+
+When running from an environment that cannot access GitHub directly, start the
+small GitHub harness from a normal shell first. PTQ will auto-detect the default
+Unix socket and route GitHub CLI requests through that process.
+
+```bash
+python scripts/github_harness.py serve
+```
+
+```bash
+# Select issues, then run solver/evaluator loops in parallel
+uv run ptq orchestrate --prompt "open issues labeled 'module: nn' with a repro script" --parallel 4 --machine my-gpu-box
+
+# Run one explicit issue through the loop
+uv run ptq orchestrate --issue 76449 --machine my-gpu-box
+
+# Preview selected issues without launching agents
+uv run ptq orchestrate --prompt "open good first issue bugs" --dry-run
+
+# Evaluate an existing job
+uv run ptq evaluate --issue 174923
+
+# Inspect orchestrator JSONL history
+uv run ptq orchestrate-results
+```
+
+The evaluator asks every configured reviewer model for structured feedback.
+By default that is `gpt-5.5` and `claude-opus-4-7`. A diff is not considered
+ready for human review unless every reviewer scores it at or above the
+approval threshold.
+
+### 5. Web dashboard
 
 ```bash
 uv run ptq web
@@ -182,7 +217,7 @@ List everything available from CLI with:
 ptq presets
 ```
 
-### 5. Monitor progress (CLI)
+### 6. Monitor progress (CLI)
 
 ```bash
 # Peek at the agent's worklog
@@ -197,7 +232,7 @@ uv run ptq list
 
 The agent maintains a `worklog.md` with entries after each significant step, so you can check progress without streaming the full output.
 
-### 6. View results
+### 7. View results
 
 ```bash
 # By issue number (uses most recent job)
@@ -209,7 +244,7 @@ uv run ptq results 20260214-174923
 
 Fetches `report.md`, `fix.diff`, `worklog.md`, and the run log from the remote.
 
-### 7. Apply the fix
+### 8. Apply the fix
 
 ```bash
 uv run ptq apply 174923 --pytorch-path ~/meta/pytorch
@@ -217,7 +252,7 @@ uv run ptq apply 174923 --pytorch-path ~/meta/pytorch
 
 Creates a branch `ptq/{issue_number}`, applies the diff, and prints next steps for creating a PR.
 
-### 8. Manage agents
+### 9. Manage agents
 
 ```bash
 # Check status of a specific job
@@ -233,7 +268,7 @@ uv run ptq prune my-gpu-box
 uv run ptq prune --local
 ```
 
-### 9. Clean up
+### 10. Clean up
 
 ```bash
 # Remove all jobs on a machine
@@ -263,6 +298,11 @@ Removes job directories and prunes git worktrees.
 | `--max-turns` | run | 100 | Max agent turns |
 | `-m/--message` | run | | Ad-hoc task or extra context for an issue |
 | `-p/--preset` | run | | Prompt preset key/title from prompt library |
+| `--review-file` | run | | Evaluator feedback JSON to inject into a rerun |
+| `--prompt` | orchestrate | config | Natural-language issue selection criteria |
+| `--parallel` | orchestrate | 4 | Concurrent solver/evaluator loops |
+| `--issue` | orchestrate | | One explicit GitHub issue to run |
+| `--dry-run` | orchestrate | false | Select issues without launching agents |
 | `--workspace` | setup, run, worktree, prune | `~/ptq_workspace` | Custom workspace path |
 | `--keep` | clean | 0 | Number of recent jobs to keep |
 | `--log` | peek | 0 | Number of log lines to show |
@@ -306,6 +346,8 @@ pt_job_queue/
 │   ├── agents.py                       # Agent protocol + claude/codex/cursor/pi
 │   ├── config.py                       # Config loading (~/.ptq/config.toml)
 │   ├── workspace.py                    # Remote workspace setup
+│   ├── evaluator/                      # Repro gate + structured fix review
+│   ├── orchestrator/                   # Issue selection + hill-climbing loop
 │   ├── domain/
 │   │   ├── models.py                   # JobRecord, RunRequest, JobStatus, errors
 │   │   └── policies.py                 # Job ID generation

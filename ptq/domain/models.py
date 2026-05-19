@@ -172,6 +172,7 @@ class RunRequest:
     verbose: bool = False
     name: str | None = None
     repo: str = "pytorch"
+    review_feedback_json: str | None = None
 
 
 @dataclass
