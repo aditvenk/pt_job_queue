@@ -1,395 +1,448 @@
-# ptq — PyTorch Job Queue
+# pt_job_queue fork: PyTorch issue hill-climbing
 
-CLI tool that takes a GitHub issue number, SSHs into a remote GPU machine, and launches an agent (Claude/Codex/Cursor/pi) to autonomously investigate and fix the bug. The agent produces a report and a diff that you can review and turn into a PR.
+This fork adds an agentic hill-climbing loop on top of PTQ for working through
+PyTorch GitHub issues:
 
-## Install
+- **PTQ solver**: launches an agent in an isolated PyTorch worktree.
+- **Evaluator**: reviews the solver output with multiple reviewer models.
+- **Orchestrator**: selects issues, runs solver/evaluator iterations in parallel,
+  and can update a draft PR for human review.
 
-No install step needed — just use `uv run`:
+For general PTQ setup, workspace management, dashboard usage, and base solver
+behavior, use the upstream project documentation:
 
-```bash
-cd pt_job_queue
-uv run ptq --help
-```
+https://github.com/drisspg/pt_job_queue
 
-For development (tests, web dashboard):
+This README focuses on the features added in this fork.
 
-```bash
-uv run --extra dev pytest
-uv run ptq web
-```
+## Quick Start
 
-### UBER SPEED MODE GETING STARTED
-Assumes you have uv installed otherwise: `curl -LsSf https://astral.sh/uv/install.sh | sh`
+Run all commands from this repo with `uv run ptq ...`.
 
 ```bash
-git clone git@github.com:drisspg/pt_job_queue.git
+# One-time local workspace setup, if you have not already done it.
+uv run ptq setup --local
 
-# This will take a second
-uv run ptq setup --local --build
-uv run ptq run -m "tell me a story" --agent codex
+# Dry-run issue selection without launching agents.
+uv run ptq orchestrate \
+  --issue 76449 \
+  --max-issues 1 \
+  --parallel 1 \
+  --machine localhost \
+  --dry-run
+
+# Run one issue through one solver/evaluator iteration.
+uv run ptq orchestrate \
+  --issue 76449 \
+  --max-issues 1 \
+  --parallel 1 \
+  --max-iterations 1 \
+  --machine localhost \
+  --follow
 ```
 
-
-
-
-## Usage
-
-### 1. Set up a machine
+If the issue is approved and you want PTQ to push or update a draft PR, add
+`--pr`:
 
 ```bash
-# Remote GPU machine (auto-detects CUDA version)
-uv run ptq setup my-gpu-box --build
-
-# Remote with explicit CUDA version
-uv run ptq setup my-gpu-box --cuda cu130 --build
-
-# Local (for testing/development)
-uv run ptq setup --local --cpu --build
+uv run ptq orchestrate \
+  --issue 76449 \
+  --max-issues 1 \
+  --parallel 1 \
+  --machine localhost \
+  --follow \
+  --pr
 ```
 
-This creates a workspace with:
-- A `uv`-managed venv with PyTorch nightly
-- A pytorch source clone at the matching nightly commit
-- Helper scripts for applying fixes to site-packages
+PRs created by this fork are always draft PRs.
 
-When `--build` is used, setup performs a full checkout nuke before editable install (`git clean -dfx` + submodule sync/update) to avoid stale CMake/Ninja graphs after upstream file moves.
+## Orchestrator
 
-**Speed up C++ rebuilds:** Install system NCCL to skip building it from source (~5 min savings per rebuild):
+The orchestrator manages the full issue loop:
+
+1. Select GitHub issues from a prompt or explicit issue number.
+2. Launch PTQ solver jobs in isolated git worktrees.
+3. Run the evaluator on `report.md`, `fix.diff`, `status.json`, and the repro.
+4. Feed evaluator feedback back into the next solver iteration.
+5. Stop when approved, shelved, or max iterations is reached.
+6. Optionally push or update a draft PR with `--pr`.
+
+Examples:
 
 ```bash
-sudo apt install -y libnccl-dev
+# Run one explicit issue.
+uv run ptq orchestrate --issue 166156 --machine localhost --follow
+
+# Run one explicit issue and update/create a draft PR after approval.
+uv run ptq orchestrate --issue 166156 --machine localhost --follow --pr
+
+# Select issues from natural-language criteria.
+uv run ptq orchestrate \
+  --prompt "open issues labeled 'module: nn' with a repro script" \
+  --max-issues 10 \
+  --parallel 4 \
+  --machine my-gpu-box
+
+# Preview what would be selected.
+uv run ptq orchestrate \
+  --prompt "good first issue bugs mentioning incorrect output" \
+  --max-issues 5 \
+  --dry-run
 ```
 
-Then add to `~/.ptq/config.toml`:
+Useful flags:
 
-```toml
-[build.env]
-USE_SYSTEM_NCCL = "1"
-```
+| Flag | Meaning |
+| --- | --- |
+| `--issue N` | Run one explicit PyTorch issue. |
+| `--prompt TEXT` | Natural-language GitHub issue selection criteria. |
+| `--max-issues N` | Maximum issues to select. |
+| `--parallel N` | Number of concurrent solver/evaluator loops. |
+| `--max-iterations N` | Max solver/evaluator iterations per issue. |
+| `--machine NAME` | Remote machine, or `localhost`/`local` for local worktrees. |
+| `--follow` | Stream solver activity in the orchestrator console. |
+| `--poll-seconds N` | Poll interval while waiting on solver jobs. |
+| `--dry-run` | Select issues without launching solver jobs. |
+| `--pr` | Push/create or update a draft PR after approval. |
 
-### 2. Create a named worktree
+View orchestrator history:
 
 ```bash
-# On a remote machine
-uv run ptq worktree flex-attn --machine my-gpu-box
-
-# Locally (default when no --machine)
-uv run ptq worktree my-fix --local
-
-# With verbose build output
-uv run ptq worktree stride-fix --machine my-gpu-box -v
+uv run ptq orchestrate-results
 ```
 
-Creates a PyTorch git worktree with a ready-to-use venv, without launching an agent. Useful when you want to work in the worktree yourself or defer agent launch. Run `ptq setup ...` first — `worktree` assumes the workspace already exists. The command prints the shell command to enter the worktree.
+The JSONL log is written to:
 
-Later, launch an agent in the same worktree by name:
+```text
+~/.ptq/orchestrator/runs.jsonl
+```
+
+## Evaluator
+
+The evaluator runs inline and does not require GPU access. It reviews the solver
+artifacts and returns structured feedback:
+
+- `verdict`: `approved`, `needs_revision`, or `shelve`
+- `score`: `0.0` to `1.0`
+- repro fidelity status
+- blocking/suggestion/nit comments
+- reviewer-specific scores
+
+By default every diff is reviewed by two reviewer models:
+
+- `gpt-5.5`
+- `claude-opus-4-7`
+
+The diff is not considered ready for human review unless both reviewers score it
+above the configured approval threshold.
+
+Run evaluator standalone on an existing job:
 
 ```bash
-uv run ptq run flex-attn -m "optimize the CPU codegen"
+uv run ptq evaluate 20260518-pytorch-76449 --issue 76449
 ```
 
-The worktree shows up in `ptq list` and can be cleaned with `ptq clean` like any other job.
+The evaluator writes `review.json` into the job directory.
 
-### 3. Launch an investigation
+## Repro Gate
+
+The evaluator has a blocking Step 0 repro-fidelity check.
+
+If the solver generated a repro, the evaluator checks that it matches the issue:
+
+- same failure
+- same API surface
+- same traceback or error behavior where available
+- minimal but faithful scenario
+- no unrelated pass/fail reason
+
+If the repro is unfaithful, the evaluator returns `needs_revision` with score
+`0.0`, and the next solver run is told to fix the repro first.
+
+Solver repro naming convention:
+
+```text
+repro_<issue>.py             # extracted directly from the issue
+repro_<issue>_generated.py   # generated by the solver
+```
+
+## Solver Artifacts
+
+Solver runs are expected to write:
+
+```text
+report.md
+fix.diff
+status.json
+```
+
+`status.json` drives evaluator/orchestrator behavior. Example:
+
+```json
+{
+  "state": "ready_for_review",
+  "iteration": 1,
+  "repro_source": "generated",
+  "repro_file": "repro_166156_generated.py",
+  "repro_passes_before_fix": false,
+  "repro_passes_after_fix": true,
+  "how_repro_was_run": "~/.ptq_workspace/jobs/<job>/.venv/bin/python ~/.ptq_workspace/jobs/<job>/repro_166156_generated.py",
+  "files_changed": [
+    "torch/distributed/tensor/_api.py",
+    "test/distributed/tensor/test_dtensor.py"
+  ],
+  "summary": "Preserve Parameter-ness when DTensor.to_local() is called on Parameter(DTensor).",
+  "resolved_pr_comments": []
+}
+```
+
+If the solver cannot reproduce the issue, it should still write `report.md`, an
+empty `fix.diff`, and `status.json` with:
+
+```json
+{
+  "state": "not_reproducible",
+  "repro_passes_before_fix": true,
+  "repro_passes_after_fix": null,
+  "files_changed": [],
+  "summary": "Could not reproduce the reported failure"
+}
+```
+
+## Draft PR Flow
+
+When `--pr` is set and the evaluator approves the fix, PTQ will:
+
+1. Check out branch `ptq/<issue>`.
+2. Commit the solver changes with a detailed commit message.
+3. Include `Fixes #<issue>` in the commit footer.
+4. Push the branch.
+5. Create or update a draft PR.
+6. Keep the PR in draft state.
+
+Example:
 
 ```bash
-# On a remote machine
-uv run ptq run --issue 174923 --machine my-gpu-box
-
-# Locally
-uv run ptq run --issue 174923 --local
-
-# Run in background (don't stream output)
-uv run ptq run --issue 174923 --machine my-gpu-box --no-follow
-
-# Ad-hoc task (no issue, just a message)
-uv run ptq run --machine my-gpu-box -m "Optimize the flex attention CPU codegen"
-
-# Issue + extra context
-uv run ptq run --issue 174923 --machine my-gpu-box -m "Focus on the stride logic"
-
-# Use a preset template from the prompt library
-ptq run --issue 174923 --machine my-gpu-box -p diagnose_and_plan
-
-# Preset + extra instructions (appends your -m text)
-ptq run --issue 174923 --machine my-gpu-box -p fix_and_verify -m "focus only on scaled_mm path"
-
-# Use a different agent
-uv run ptq run --issue 174923 --machine my-gpu-box --agent cursor --model gpt-5.3-codex-xhigh-fast
-
-# Use first-class thinking control when the backend supports it
-uv run ptq run --agent pi --model openai-codex/gpt-5.5 --thinking high -m "triage the repro"
-
-# Re-run with evaluator feedback
-uv run ptq run 20260214-174923 --review-file review.json
+uv run ptq orchestrate --issue 166156 --machine localhost --follow --pr
 ```
 
-The agent will:
-1. Reproduce the bug using a repro script extracted from the issue
-2. Read pytorch source to find the root cause
-3. Apply a minimal Python-only fix
-4. Test the fix by copying edits to site-packages and re-running the repro
-5. Write `report.md`, `fix.diff`, and `status.json`
+PR description format:
 
-Re-running the same issue reuses the existing worktree and preserves prior edits. Each run gets its own log (`claude-1.log`, `claude-2.log`, ...). Different issues run concurrently via separate git worktrees. Fresh workspaces still need an explicit `ptq setup ...` first.
+- human note
+- agent report summary
+- root cause
+- fix
+- repro command and repro script
+- testing
+- files changed
+- `Fixes #<issue>`
 
-### 4. Agentic issue loop
+The repro is included in the PR body. PTQ no longer posts a separate repro
+comment.
 
-When running from an environment that cannot access GitHub directly, start the
-small GitHub harness from a normal shell first. PTQ will auto-detect the default
-Unix socket and route GitHub CLI requests through that process.
+## PR Feedback Loop
+
+If a draft PR already exists, rerunning orchestrate will find it by stored PR URL
+or by branch name `ptq/<issue>`.
+
+Before launching the solver, PTQ reads:
+
+- PR conversation comments
+- inline review comments
+- review bodies
+- review-bot comments, including Claude or other bots
+- failing PR checks
+- bounded failed GitHub Actions log excerpts, when available
+
+The feedback is injected into the solver context as `github_pr_feedback`.
+
+Rerun example:
+
+```bash
+uv run ptq orchestrate \
+  --issue 166156 \
+  --max-issues 1 \
+  --parallel 1 \
+  --machine localhost \
+  --follow \
+  --pr
+```
+
+The solver should fix PR-caused feedback and CI failures. If a CI failure is
+unrelated, flaky, or infrastructure-caused, it should document that in
+`report.md` rather than making speculative code changes.
+
+When the solver resolves a specific PR comment, it can list that comment in
+`status.json`:
+
+```json
+{
+  "resolved_pr_comments": [
+    {
+      "comment_id": 123456789,
+      "kind": "inline",
+      "resolution": "Added no_grad coverage for the Parameter(DTensor) path."
+    }
+  ]
+}
+```
+
+After updating the draft PR, PTQ replies to those comments with a short bot
+message:
+
+```text
+[bot] Resolved in the latest update. Added no_grad coverage for the Parameter(DTensor) path.
+```
+
+PTQ adds hidden markers to avoid posting duplicate resolution replies on later
+runs. PTQ-managed comments are filtered out of future solver feedback, while
+review comments from other bots are preserved.
+
+## Watching Solver Progress
+
+`--follow` streams solver events through the orchestrator for single-issue runs.
+You can also inspect a job directly:
+
+```bash
+uv run ptq peek 20260518-pytorch-76449 --log 80
+uv run ptq watch 20260518-pytorch-76449
+```
+
+`peek` shows the worklog and recent agent log events. `watch` streams an
+existing job until it stops.
+
+## GitHub Harness
+
+Normal command-line use does not need the harness. If `gh auth status` and
+GitHub network access work in your shell, PTQ runs `gh` directly.
+
+The harness exists for environments where the agent process cannot access
+GitHub directly. Start it from a normal shell:
 
 ```bash
 python scripts/github_harness.py serve
 ```
 
-```bash
-# Select issues, then run solver/evaluator loops in parallel
-uv run ptq orchestrate --prompt "open issues labeled 'module: nn' with a repro script" --parallel 4 --machine my-gpu-box
+It listens on:
 
-# Run one explicit issue through the loop
-uv run ptq orchestrate --issue 76449 --machine my-gpu-box
-
-# Preview selected issues without launching agents
-uv run ptq orchestrate --prompt "open good first issue bugs" --dry-run
-
-# Evaluate an existing job
-uv run ptq evaluate --issue 174923
-
-# Inspect orchestrator JSONL history
-uv run ptq orchestrate-results
+```text
+~/.ptq/github_harness.sock
 ```
 
-The evaluator asks every configured reviewer model for structured feedback.
-By default that is `gpt-5.5` and `claude-opus-4-7`. A diff is not considered
-ready for human review unless every reviewer scores it at or above the
-approval threshold.
+PTQ auto-detects the socket. If the socket is stale or refused, PTQ falls back to
+direct `gh` execution for normal shell use.
 
-### 5. Web dashboard
+Stop and remove the harness socket:
 
 ```bash
-uv run ptq web
-# or on a custom port
-uv run ptq web --port 9000
+pkill -f "scripts/github_harness.py serve"
+rm -f ~/.ptq/github_harness.sock
 ```
 
-The web UI lets you:
-- Launch jobs (issue-based or ad-hoc) with agent/model/thinking/machine selection
-- Fill the message box from a built-in prompt library for `Repro Only`, `Diagnose And Plan`, and `Fix And Verify`
-- Monitor live logs via streaming
-- View reports, diffs, and worklogs
-- Follow up on stopped jobs with steering messages
-- **Take Over** — copies an SSH command that drops you into the job's worktree with the venv activated
-- Create PRs directly from the UI
+## Configuration
 
-### Web UI preview
-
-> Add a screenshot at `docs/assets/web-ui.png` and this README will render it automatically.
-
-![ptq web ui](docs/assets/web-ui.png)
-
-The prompt library is backed by `~/.ptq/config.toml`.
-
-Per-agent model defaults live there too. For backends with first-class reasoning controls, you can set thinking separately from the model:
+`~/.ptq/config.toml` supports these fork-specific sections:
 
 ```toml
-[models.pi]
-default = "openai-codex/gpt-5.5"
-thinking = "high"
+[orchestrator]
+github_repo = "pytorch/pytorch"
+issue_selection_prompt = "open issues labeled 'module: nn' with a repro script, filed in the last 30 days"
+max_issues = 20
+parallel = 4
+max_iterations = 5
+approval_threshold = 0.8
+machine = "localhost"
+
+[evaluator]
+models = ["gpt-5.5", "claude-opus-4-7"]
+approval_threshold = 0.8
+shelve_threshold = 0.3
+max_iterations = 5
+```
+
+The orchestrator uses the default solver agent/model from the normal PTQ
+`[defaults]` and `[models.*]` settings.
+
+Example solver defaults:
+
+```toml
+[defaults]
+agent = "claude"
+max_turns = 100
 
 [models.claude]
 default = "opus"
+
+[models.pi]
+default = "openai-codex/gpt-5.5"
 thinking = "high"
-
-[models.codex]
-default = "gpt-5.4"
-thinking = "high"
 ```
 
-Cursor currently encodes reasoning level in the model name itself, so PTQ continues to treat Cursor thinking as model-driven.
+## Results and Artifacts
 
-- Built-ins are always available and can be overridden under `[prompt_library.builtin.<name>]`
-- User presets can be added under `[prompt_library.custom.<name>]`
-
-List everything available from CLI with:
+Fetch artifacts for a job:
 
 ```bash
-ptq presets
+uv run ptq results 20260518-pytorch-76449
 ```
 
-### 6. Monitor progress (CLI)
+Fetched artifacts include:
+
+- `report.md`
+- `fix.diff`
+- `worklog.md`
+- `status.json`
+- `review.json`
+- issue-specific repro scripts
+- the latest agent log
+
+PTQ-managed worktrees live under:
+
+```text
+~/.ptq_workspace/jobs/<job-id>/pytorch/
+```
+
+The per-job venv is:
+
+```text
+~/.ptq_workspace/jobs/<job-id>/.venv/
+```
+
+## Development
+
+Run tests with the repo convention:
 
 ```bash
-# Peek at the agent's worklog
-uv run ptq peek 174923
-
-# Peek with recent log activity
-uv run ptq peek 174923 --log 30
-
-# List all jobs with running/stopped status
-uv run ptq list
+uv run --extra dev pytest
 ```
 
-The agent maintains a `worklog.md` with entries after each significant step, so you can check progress without streaming the full output.
-
-### 7. View results
+Focused tests for this fork:
 
 ```bash
-# By issue number (uses most recent job)
-uv run ptq results 174923
-
-# By full job ID
-uv run ptq results 20260214-174923
+uv run --extra dev pytest \
+  tests/test_evaluator.py \
+  tests/test_repro_validator.py \
+  tests/test_orchestrator.py \
+  tests/test_pr.py \
+  tests/test_issue.py \
+  tests/test_cli.py
 ```
 
-Fetches `report.md`, `fix.diff`, `worklog.md`, and the run log from the remote.
+## Added Modules
 
-### 8. Apply the fix
+```text
+ptq/evaluator/
+  models.py          # ReviewResult, ReviewComment
+  rubric.py          # Structured evaluator prompt
+  repro_validator.py # Repro-fidelity gate
+  evaluator.py       # Multi-reviewer evaluator
 
-```bash
-uv run ptq apply 174923 --pytorch-path ~/meta/pytorch
-```
+ptq/orchestrator/
+  models.py          # OrchestratorConfig, Issue, SolveResult
+  issue_selector.py  # GitHub issue query translation/fetching
+  orchestrator.py    # Hill-climbing loop
+  reporter.py        # JSONL result logging
 
-Creates a branch `ptq/{issue_number}`, applies the diff, and prints next steps for creating a PR.
-
-### 9. Manage agents
-
-```bash
-# Check status of a specific job
-uv run ptq status 174923
-
-# Kill a specific agent
-uv run ptq kill 174923
-
-# Kill all agents on a machine (tracked + zombie processes)
-uv run ptq prune my-gpu-box
-
-# Kill all local agents
-uv run ptq prune --local
-```
-
-### 10. Clean up
-
-```bash
-# Remove all jobs on a machine
-uv run ptq clean my-gpu-box
-
-# Keep the 3 most recent
-uv run ptq clean my-gpu-box --keep 3
-
-# Clean local workspace
-uv run ptq clean --local
-```
-
-Removes job directories and prunes git worktrees.
-
-## Options
-
-| Flag | Command | Default | Description |
-|------|---------|---------|-------------|
-| `--cuda` | setup | auto-detect | CUDA tag (`cu124`, `cu126`, `cu128`, `cu130`) |
-| `--cpu` | setup | | Use CPU-only PyTorch (macOS/testing) |
-| `--machine` | run, worktree | | Remote machine hostname |
-| `--local` | setup, run, worktree, clean, prune | | Use local workspace instead of SSH |
-| `--follow/--no-follow` | run | follow | Stream agent output to terminal |
-| `--agent` | run | claude | Agent (`claude`, `codex`, `cursor`, `pi`) |
-| `--model` | run | opus | Model name (agent-specific) |
-| `--thinking` | run | agent default | Reasoning/thinking level when supported by the agent |
-| `--max-turns` | run | 100 | Max agent turns |
-| `-m/--message` | run | | Ad-hoc task or extra context for an issue |
-| `-p/--preset` | run | | Prompt preset key/title from prompt library |
-| `--review-file` | run | | Evaluator feedback JSON to inject into a rerun |
-| `--prompt` | orchestrate | config | Natural-language issue selection criteria |
-| `--parallel` | orchestrate | 4 | Concurrent solver/evaluator loops |
-| `--issue` | orchestrate | | One explicit GitHub issue to run |
-| `--dry-run` | orchestrate | false | Select issues without launching agents |
-| `--workspace` | setup, run, worktree, prune | `~/ptq_workspace` | Custom workspace path |
-| `--keep` | clean | 0 | Number of recent jobs to keep |
-| `--log` | peek | 0 | Number of log lines to show |
-
-## Adding a new repo
-
-1. Add a `[repos.<name>]` section to `~/.ptq/config.toml`:
-
-```toml
-[repos.torchtitan]
-github_repo = "pytorch/torchtitan"
-clone_url = "https://github.com/pytorch/torchtitan.git"
-dir_name = "torchtitan"
-smoke_test_import = "torchtitan"
-repro_import_hint = "import torchtitan"
-```
-
-2. Create prompt templates in `prompts/`:
-   - `prompts/investigate_<name>.md` — issue investigation prompt
-   - `prompts/adhoc_<name>.md` — freeform task prompt
-
-The prompt templates are where the real work is — they teach the agent about the repo's build system, directory layout, debugging tools, and testing conventions. See the existing `investigate.md` and `investigate_torchtitan.md` for examples.
-
-Optional profile fields (all default to `false`/`null`):
-| Field | Description |
-|-------|-------------|
-| `uses_custom_worktree_tool` | Use `tools/create_worktree.py` instead of `git worktree add` |
-| `needs_cpp_build` | Run C++ rebuild after worktree creation |
-| `lint_cmd` | Lint command to run before PRs |
-
-## Project layout
-
-```
-pt_job_queue/
-├── pyproject.toml
-├── ptq/
-│   ├── cli.py                          # Thin Typer CLI adapter
-│   ├── ssh.py                          # SSH/SCP + local subprocess backends
-│   ├── issue.py                        # GitHub issue fetching via gh
-│   ├── agent.py                        # Prompt construction + text utilities
-│   ├── agents.py                       # Agent protocol + claude/codex/cursor/pi
-│   ├── config.py                       # Config loading (~/.ptq/config.toml)
-│   ├── workspace.py                    # Remote workspace setup
-│   ├── evaluator/                      # Repro gate + structured fix review
-│   ├── orchestrator/                   # Issue selection + hill-climbing loop
-│   ├── domain/
-│   │   ├── models.py                   # JobRecord, RunRequest, JobStatus, errors
-│   │   └── policies.py                 # Job ID generation
-│   ├── infrastructure/
-│   │   ├── job_repository.py           # JSON persistence (~/.ptq/jobs.json)
-│   │   └── backends.py                 # Backend factory functions
-│   ├── application/
-│   │   ├── run_service.py              # Launch/rerun orchestration
-│   │   ├── worktree_service.py         # Worktree + venv provisioning
-│   │   ├── job_service.py              # Status/kill/clean/list
-│   │   ├── artifact_service.py         # Results fetching + diff apply
-│   │   └── pr_service.py              # PR creation workflow
-│   └── web/
-│       ├── app.py                      # FastAPI app factory
-│       ├── deps.py                     # Template + status helpers
-│       ├── routes.py                   # Thin web route adapter
-│       ├── static/style.css            # Dark-theme styles
-│       └── templates/                  # Jinja2 templates (Pico CSS + htmx)
-├── prompts/
-│   ├── investigate.md                  # PyTorch issue investigation prompt
-│   ├── adhoc.md                        # PyTorch freeform task prompt
-│   ├── investigate_torchtitan.md       # TorchTitan issue investigation prompt
-│   └── adhoc_torchtitan.md             # TorchTitan freeform task prompt
-└── scripts/
-    └── rebuild.sh
-```
-
-## Workspace layout (on remote/local)
-
-```
-~/ptq_workspace/
-├── .venv/                          # uv-managed, PyTorch nightly
-├── pytorch/                        # Source clone at nightly commit
-├── scripts/apply_to_site_pkgs.sh   # Copies edits to site-packages
-└── jobs/
-    └── 20260214-174923/            # Per-issue job directory
-        ├── pytorch/                # git worktree (isolated)
-        ├── system_prompt.md
-        ├── repro.py
-        ├── claude-1.log            # Per-run logs
-        ├── claude-2.log
-        ├── worklog.md              # Agent progress log
-        ├── report.md
-        └── fix.diff
+scripts/github_harness.py
+  Optional external gh execution harness.
 ```
