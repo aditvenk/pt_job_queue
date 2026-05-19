@@ -118,7 +118,7 @@ cd {workspace}/jobs/{job_id}/pytorch && git diff > {workspace}/jobs/{job_id}/fix
 
 Use `"repro_source": "generated"` and `"repro_file": "repro_{issue_number}_generated.py"` when you wrote the repro yourself.
 
-If this run includes GitHub PR feedback, each feedback item has an `id`, `kind`, `body`, and usually a `url`. When you have resolved a specific human PR comment, include it in `resolved_pr_comments` so PTQ can reply to that exact comment after updating the draft PR:
+If this run includes GitHub PR feedback, each feedback item has an `id`, `kind`, `author`, `body`, and usually a `url`. Feedback may come from human reviewers or review bots such as Claude; treat actionable bot feedback like human review feedback. When you have resolved a specific PR comment, include it in `resolved_pr_comments` so PTQ can reply to that exact comment after updating the draft PR:
 ```json
 {{
   "resolved_pr_comments": [
@@ -130,7 +130,7 @@ If this run includes GitHub PR feedback, each feedback item has an `id`, `kind`,
   ]
 }}
 ```
-Only list comments that are actually addressed by this run. Keep each `resolution` to one short sentence; put detailed analysis in `report.md`, not in the PR comment reply. Do not include evaluator comments here; use this field for GitHub PR comments from human reviewers.
+Only list comments that are actually addressed by this run. Keep each `resolution` to one short sentence; put detailed analysis in `report.md`, not in the PR comment reply. Do not include evaluator comments here; use this field for GitHub PR comments from reviewers, including review bots.
 
 If this run includes failing GitHub PR checks in `github_pr_feedback.ci_failures`, review the failing check names, descriptions, links, and any included `failed_log_excerpt` fields before changing code. Follow the linked logs if the excerpt is insufficient. Decide whether each failure is caused by this PR. Fix PR-caused CI failures before finishing. If a failure is unrelated, flaky, or caused by CI infrastructure, do not make speculative unrelated changes; document the reason in `report.md` under Test results.
 

@@ -525,8 +525,11 @@ class TestCreatePr:
                         '"html_url": "https://github.com/pytorch/pytorch/pull/99#issuecomment-1"},'
                         '{"body": "<!-- ptq:repro-script -->\\nold", '
                         '"user": {"login": "bot"}},'
-                        '{"body": "[bot] Resolved in latest update.", '
-                        '"id": 112, "user": {"login": "ptq-bot"}}]'
+                        '{"body": "[bot] Resolved in latest update.\\n\\n'
+                        '<!-- ptq:resolution:112 -->", '
+                        '"id": 112, "user": {"login": "ptq-bot"}},'
+                        '{"body": "[bot] Claude review: add the BC test.", '
+                        '"id": 113, "user": {"login": "claude-review-bot"}}]'
                     ),
                     "",
                 )
@@ -579,13 +582,16 @@ class TestCreatePr:
 
         assert feedback is not None
         assert feedback["pr_url"] == "https://github.com/pytorch/pytorch/pull/99"
-        assert len(feedback["comments"]) == 3
+        assert len(feedback["comments"]) == 4
         assert feedback["comments"][0]["kind"] == "conversation"
         assert feedback["comments"][0]["id"] == 111
-        assert feedback["comments"][1]["path"] == "torch/foo.py"
-        assert feedback["comments"][2]["state"] == "CHANGES_REQUESTED"
+        assert feedback["comments"][1]["id"] == 113
+        assert feedback["comments"][1]["author"] == "claude-review-bot"
+        assert feedback["comments"][1]["body"].startswith("[bot] Claude review")
+        assert feedback["comments"][2]["path"] == "torch/foo.py"
+        assert feedback["comments"][3]["state"] == "CHANGES_REQUESTED"
         assert all("ptq:repro-script" not in c["body"] for c in feedback["comments"])
-        assert all(not c["body"].startswith("[bot]") for c in feedback["comments"])
+        assert all("ptq:resolution:" not in c["body"] for c in feedback["comments"])
         assert len(feedback["ci_failures"]) == 1
         assert feedback["ci_failures"][0]["name"] == "linux-test"
         assert feedback["ci_failures"][0]["link"].endswith("/actions/runs/1")

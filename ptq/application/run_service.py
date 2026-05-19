@@ -97,9 +97,10 @@ def _build_review_context(review_feedback_json: str | None) -> str:
     return (
         "\n\n## Review Feedback\n"
         "The previous solver attempt may have been reviewed by automated evaluators "
-        "or by humans on a draft GitHub PR. Treat this as structured blocking "
-        "feedback for the current run. Address blocking comments and GitHub PR "
-        "comments first, especially repro-fidelity comments, and update artifacts "
+        "or by reviewers on a draft GitHub PR, including human reviewers and "
+        "review bots such as Claude. Treat this as structured blocking feedback "
+        "for the current run. Address blocking comments and GitHub PR comments "
+        "first, especially repro-fidelity comments, and update artifacts "
         "when done. If you address a specific GitHub PR comment from "
         "`github_pr_feedback.comments`, add it to `status.json` as "
         "`resolved_pr_comments` with its `comment_id`, `kind`, and a very short "
