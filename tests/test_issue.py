@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from unittest.mock import patch
 
-from ptq.issue import extract_repro_script, fetch_issue, format_issue_context
+from ptq.issue import extract_repro_script, fetch_issue, format_issue_context, search_issues
 
 
 class TestExtractReproScript:
@@ -93,3 +93,34 @@ class TestFetchIssue:
         assert "gh" in args
         assert "12345" in args
         assert "pytorch/pytorch" in args
+
+    def test_uses_external_harness_when_available(self):
+        fake_data = {"title": "Bug", "body": "desc", "comments": [], "labels": []}
+        with (
+            patch("ptq.issue.harness_available", return_value=True),
+            patch("ptq.issue.call_github_harness", return_value=fake_data) as harness,
+        ):
+            result = fetch_issue(12345)
+        assert result == fake_data
+        harness.assert_called_once_with(
+            "fetch_issue",
+            repo="pytorch/pytorch",
+            issue_number=12345,
+        )
+
+
+class TestSearchIssues:
+    def test_uses_external_harness_when_available(self):
+        fake_rows = [{"number": 12345, "title": "Bug"}]
+        with (
+            patch("ptq.issue.harness_available", return_value=True),
+            patch("ptq.issue.call_github_harness", return_value=fake_rows) as harness,
+        ):
+            result = search_issues("is:issue is:open", repo="pytorch/pytorch", limit=5)
+        assert result == fake_rows
+        harness.assert_called_once_with(
+            "search_issues",
+            repo="pytorch/pytorch",
+            query="is:issue is:open",
+            limit=5,
+        )
