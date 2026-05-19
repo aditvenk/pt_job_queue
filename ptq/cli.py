@@ -933,7 +933,7 @@ def _evaluator_models(evaluator_section: dict) -> list[str]:
     return ["gpt-5.5", "claude-opus-4-7"]
 
 
-def _orchestrate_report_path(job_id: str | None) -> str | None:
+def _orchestrate_report_display(job_id: str | None) -> str | None:
     if not job_id:
         return None
     try:
@@ -943,8 +943,22 @@ def _orchestrate_report_path(job_id: str | None) -> str | None:
 
     path = f"{job.workspace}/jobs/{job_id}/report.md"
     if job.local:
-        return str(Path(job.workspace).expanduser() / "jobs" / job_id / "report.md")
-    return f"{job.machine or 'remote'}:{path}"
+        local_path = Path(job.workspace).expanduser() / "jobs" / job_id / "report.md"
+        if local_path.exists():
+            return str(local_path)
+        return f"missing (expected at {local_path})"
+
+    remote_path = f"{job.machine or 'remote'}:{path}"
+    try:
+        from ptq.infrastructure.backends import backend_for_job
+
+        backend = backend_for_job(job)
+        if backend.run(f"test -f {path}", check=False).returncode == 0:
+            return remote_path
+    except Exception:
+        pass
+    return f"missing (expected at {remote_path})"
+
 
 
 def _print_orchestrate_results(results) -> None:
@@ -961,11 +975,11 @@ def _print_orchestrate_results(results) -> None:
             f"score={score:.2f} iterations={iterations} "
             f"job={job_id} branch={branch}"
         )
-        report_path = _orchestrate_report_path(result.job_id)
-        if report_path:
-            console.print(f"  report.md: {report_path}")
+        report_display = _orchestrate_report_display(result.job_id)
+        if report_display:
+            console.print(f"  report.md: {report_display}", soft_wrap=True)
         if pr_url:
-            console.print(f"  PR: {pr_url}")
+            console.print(f"  PR: {pr_url}", soft_wrap=True)
 
 
 @app.command()

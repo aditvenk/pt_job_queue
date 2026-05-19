@@ -739,6 +739,10 @@ def test_orchestrate_uses_config_max_issues_for_prompt_selection():
 
 
 def test_orchestrate_final_output_points_to_report_and_pr(tmp_path):
+    workspace = tmp_path / "ws"
+    report = workspace / "jobs" / "job-123" / "report.md"
+    report.parent.mkdir(parents=True)
+    report.write_text("report")
     repo = _make_repo(
         tmp_path,
         [
@@ -746,7 +750,7 @@ def test_orchestrate_final_output_points_to_report_and_pr(tmp_path):
                 job_id="job-123",
                 issue=123,
                 local=True,
-                workspace="~/ptq_test_ws",
+                workspace=str(workspace),
             )
         ],
     )
@@ -785,11 +789,54 @@ def test_orchestrate_final_output_points_to_report_and_pr(tmp_path):
         "#123 approved score=0.91 iterations=1 job=job-123 branch=ptq/123"
         in result.output
     )
-    assert (
-        f"report.md: {Path.home()}/ptq_test_ws/jobs/job-123/report.md"
-        in result.output
-    )
+    assert f"report.md: {report}" in result.output
     assert "PR: https://github.com/pytorch/pytorch/pull/1" in result.output
+
+
+def test_orchestrate_final_output_marks_missing_report(tmp_path):
+    workspace = tmp_path / "ws"
+    repo = _make_repo(
+        tmp_path,
+        [
+            JobRecord(
+                job_id="job-123",
+                issue=123,
+                local=True,
+                workspace=str(workspace),
+            )
+        ],
+    )
+
+    class FakeEvaluator:
+        def __init__(self, **kwargs):
+            pass
+
+    class FakeOrchestrator:
+        def __init__(self, config, **kwargs):
+            pass
+
+        async def run(self):
+            return [
+                SolveResult(
+                    issue=Issue(number=123, title="bug"),
+                    verdict="error",
+                    score=0.0,
+                    iterations=0,
+                    job_id="job-123",
+                )
+            ]
+
+    with (
+        patch("ptq.cli._repo", return_value=repo),
+        patch("ptq.config.load_config", return_value=_fake_orchestrate_config()),
+        patch("ptq.evaluator.Evaluator", FakeEvaluator),
+        patch("ptq.orchestrator.Orchestrator", FakeOrchestrator),
+    ):
+        result = runner.invoke(app, ["orchestrate", "--issue", "123"])
+
+    expected = workspace / "jobs" / "job-123" / "report.md"
+    assert result.exit_code == 0, result.output
+    assert f"report.md: missing (expected at {expected})" in result.output
 
 
 def test_orchestrate_has_no_max_issues_flag():
