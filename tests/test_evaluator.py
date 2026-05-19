@@ -4,7 +4,7 @@ import json
 import urllib.error
 from unittest.mock import patch
 
-from ptq.evaluator import Evaluator, SolverOutput
+from ptq.evaluator import Evaluator, ReviewerSpec, SolverOutput
 from ptq.evaluator.evaluator import (
     _call_openai,
     _claude_cli_model,
@@ -167,6 +167,54 @@ def test_approved_only_when_every_reviewer_scores_high_enough():
     )
     assert result.verdict == "approved"
     assert result.score == 0.88
+
+
+def test_profile_backed_reviewer_uses_profile_prompt():
+    calls = []
+
+    class ProfileEvaluator(FakeEvaluator):
+        def _call_llm(self, prompt: str, model_name: str | None = None) -> str:
+            calls.append((model_name, prompt))
+            return json.dumps(
+                {
+                    "verdict": "approved",
+                    "score": 0.9,
+                    "iteration": 1,
+                    "repro_fidelity": "faithful",
+                    "comments": [],
+                    "summary": f"{model_name} approves.",
+                }
+            )
+
+    result = ProfileEvaluator(
+        reviewer_models=["gpt-5.5"],
+        additional_reviewers=[
+            ReviewerSpec(
+                name="aditvenk-style",
+                model="gpt-5.5",
+                profile_text="Prioritize BC analysis and crisp inline comments.",
+            )
+        ],
+    ).evaluate(
+        SolverOutput(
+            issue_number=174923,
+            issue_body="expected RuntimeError",
+            iteration=1,
+            report_md="",
+            fix_diff="",
+            repro_script="import torch",
+            repro_filename="repro_174923_generated.py",
+        )
+    )
+
+    assert result.verdict == "approved"
+    assert {item["reviewer"] for item in result.reviewer_results} == {
+        "gpt-5.5",
+        "aditvenk-style",
+    }
+    profile_prompts = [prompt for _model, prompt in calls if "aditvenk-style" in prompt]
+    assert profile_prompts
+    assert "Prioritize BC analysis" in profile_prompts[0]
 
 
 def test_validate_configuration_accepts_claude_cli_fallback(monkeypatch):

@@ -1,0 +1,68 @@
+from __future__ import annotations
+
+from unittest.mock import patch
+
+from ptq.evaluator.reviewer_profile import generate_reviewer_profile
+
+
+def test_generate_reviewer_profile_writes_style_markdown(tmp_path):
+    def fake_gh(args):
+        if args[:2] == ["search", "prs"]:
+            return [
+                {
+                    "number": 10,
+                    "title": "Fix distributed tensor bug",
+                    "url": "https://github.com/pytorch/pytorch/pull/10",
+                    "repository": {"nameWithOwner": "pytorch/pytorch"},
+                    "updatedAt": "2026-05-01T00:00:00Z",
+                }
+            ]
+        endpoint = args[1]
+        if endpoint.endswith("/issues/10/comments"):
+            return [
+                {
+                    "user": {"login": "aditvenk"},
+                    "body": "Can you add a regression test for this edge case?",
+                    "html_url": "https://github.com/pytorch/pytorch/pull/10#x",
+                    "created_at": "2026-05-01T00:00:00Z",
+                }
+            ]
+        if endpoint.endswith("/pulls/10/comments"):
+            return [
+                {
+                    "user": {"login": "aditvenk"},
+                    "body": (
+                        "This looks like it changes BC semantics. Can we keep "
+                        "the old path unchanged?"
+                    ),
+                    "path": "torch/foo.py",
+                    "line": 12,
+                    "html_url": "https://github.com/pytorch/pytorch/pull/10#y",
+                    "created_at": "2026-05-01T00:00:00Z",
+                },
+                {
+                    "user": {"login": "someone-else"},
+                    "body": "unrelated",
+                },
+            ]
+        if endpoint.endswith("/pulls/10/reviews"):
+            return [{"user": {"login": "aditvenk"}, "state": "COMMENTED", "body": ""}]
+        return []
+
+    output = tmp_path / "aditvenk.md"
+    with patch("ptq.evaluator.reviewer_profile._run_gh_json", side_effect=fake_gh):
+        profile = generate_reviewer_profile(
+            "aditvenk",
+            repo="pytorch/pytorch",
+            months=6,
+            limit=25,
+            output=output,
+        )
+
+    text = output.read_text()
+    assert profile.comment_count == 3
+    assert "# @aditvenk Review Profile" in text
+    assert "Review Priorities To Emulate" in text
+    assert "Regression coverage" in text
+    assert "BC/API semantic changes" in text
+    assert "Can you add a regression test" in text

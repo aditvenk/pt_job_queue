@@ -93,6 +93,10 @@ watch_pr_idle_hours = 24
 
 [evaluator]
 models = ["gpt-5.5", "claude-opus-4-7"]
+# Optional profile-backed reviewers:
+# additional_reviewers = [
+#   { name = "aditvenk-style", profile = "aditvenk", model = "gpt-5.5" },
+# ]
 approval_threshold = 0.8
 shelve_threshold = 0.3
 max_iterations = 5

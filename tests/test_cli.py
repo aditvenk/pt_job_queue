@@ -655,6 +655,48 @@ def test_orchestrate_watch_pr_implies_pr_and_sets_watch_knobs():
     assert captured["config"].watch_pr_idle_seconds == 7200
 
 
+def test_orchestrate_adds_profile_backed_evaluator():
+    captured = {}
+
+    class FakeEvaluator:
+        def __init__(self, **kwargs):
+            captured["evaluator_kwargs"] = kwargs
+
+    class FakeOrchestrator:
+        def __init__(self, config, **kwargs):
+            pass
+
+        async def run(self):
+            return []
+
+    with (
+        patch("ptq.config.load_config", return_value=_fake_orchestrate_config()),
+        patch("ptq.evaluator.Evaluator", FakeEvaluator),
+        patch("ptq.orchestrator.Orchestrator", FakeOrchestrator),
+    ):
+        result = runner.invoke(
+            app,
+            [
+                "orchestrate",
+                "--issue",
+                "123",
+                "--add-evaluator",
+                "aditvenk-style",
+                "--profile",
+                "aditvenk",
+                "--agent",
+                "gpt-5.5",
+            ],
+        )
+
+    assert result.exit_code == 0, result.output
+    specs = captured["evaluator_kwargs"]["additional_reviewers"]
+    assert len(specs) == 1
+    assert specs[0].name == "aditvenk-style"
+    assert specs[0].model == "gpt-5.5"
+    assert specs[0].profile_path.endswith("evaluator_profiles/aditvenk.md")
+
+
 def test_orchestrate_repo_flag_selects_supported_repo_profile():
     captured = {}
 
@@ -885,3 +927,48 @@ def test_orchestrate_has_no_max_issues_flag():
     assert "--max-issues" not in result.output
     assert "--repo" in result.output
     assert "--watch-pr" in result.output
+    assert "--add-evaluator" in result.output
+
+
+def test_generate_review_profile_command(tmp_path):
+    profile_path = tmp_path / "profile.md"
+    profile = type(
+        "Profile",
+        (),
+        {
+            "username": "aditvenk",
+            "path": profile_path,
+            "pr_count": 2,
+            "comment_count": 4,
+        },
+    )()
+
+    with patch(
+        "ptq.evaluator.reviewer_profile.generate_reviewer_profile",
+        return_value=profile,
+    ) as generate:
+        result = runner.invoke(
+            app,
+            [
+                "generate-review-profile",
+                "aditvenk",
+                "--repo",
+                "pytorch/pytorch",
+                "--months",
+                "6",
+                "--limit",
+                "50",
+                "--output",
+                str(profile_path),
+            ],
+        )
+
+    assert result.exit_code == 0, result.output
+    generate.assert_called_once_with(
+        "aditvenk",
+        repo="pytorch/pytorch",
+        months=6,
+        limit=50,
+        output=profile_path,
+    )
+    assert f"Wrote reviewer profile for @aditvenk: {profile_path}" in result.output

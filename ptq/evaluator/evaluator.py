@@ -8,10 +8,11 @@ import subprocess
 import tempfile
 import urllib.error
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from ptq.evaluator.models import ReviewComment, ReviewResult
+from ptq.evaluator.models import ReviewComment, ReviewResult, ReviewerSpec
 from ptq.evaluator.repro_validator import validate_repro_presence
 from ptq.evaluator.rubric import build_evaluation_prompt
 
@@ -35,30 +36,31 @@ class SolverOutput:
 class Evaluator:
     model: str = ""
     reviewer_models: list[str] | None = None
+    additional_reviewers: list[ReviewerSpec] = field(default_factory=list)
     approval_threshold: float = 0.8
     shelve_threshold: float = 0.3
     max_iterations: int = 5
 
     def validate_configuration(self) -> None:
         missing: list[str] = []
-        for reviewer_model in self._effective_reviewer_models():
-            provider, model = _infer_provider_and_model(reviewer_model)
+        for reviewer in self._effective_reviewers():
+            provider, model = _infer_provider_and_model(reviewer.model)
             if provider == "anthropic":
                 if not os.environ.get("ANTHROPIC_API_KEY") and not shutil.which(
                     "claude"
                 ):
                     missing.append(
-                        f"{reviewer_model} requires ANTHROPIC_API_KEY or the "
+                        f"{reviewer.name} requires ANTHROPIC_API_KEY or the "
                         "`claude` CLI on PATH"
                     )
             elif provider == "openai":
                 if not os.environ.get("OPENAI_API_KEY") and not shutil.which("codex"):
                     missing.append(
-                        f"{reviewer_model} requires OPENAI_API_KEY or the "
+                        f"{reviewer.name} requires OPENAI_API_KEY or the "
                         "`codex` CLI on PATH"
                     )
             else:
-                missing.append(f"{reviewer_model} resolved to unsupported provider")
+                missing.append(f"{reviewer.name} resolved to unsupported provider")
         if missing:
             raise RuntimeError(
                 "Evaluator is not configured: " + "; ".join(sorted(set(missing)))
@@ -99,19 +101,43 @@ class Evaluator:
             shelve_threshold=self.shelve_threshold,
             lint_output=lint_output,
         )
-        reviewer_results = [
-            self._evaluate_with_reviewer(
-                reviewer_model,
-                prompt,
-                iteration=solver_output.iteration,
-            )
-            for reviewer_model in self._effective_reviewer_models()
-        ]
+        reviewer_results = self._evaluate_all_reviewers(
+            self._effective_reviewers(),
+            prompt,
+            iteration=solver_output.iteration,
+        )
         return self._aggregate_reviewer_results(
             reviewer_results,
             repro_comments=repro_check.comments,
             iteration=solver_output.iteration,
         )
+
+    def _evaluate_all_reviewers(
+        self,
+        reviewers: list[ReviewerSpec],
+        prompt: str,
+        *,
+        iteration: int,
+    ) -> list[ReviewResult]:
+        if len(reviewers) <= 1:
+            return [
+                self._evaluate_with_reviewer(
+                    reviewers[0],
+                    prompt,
+                    iteration=iteration,
+                )
+            ] if reviewers else []
+        with ThreadPoolExecutor(max_workers=len(reviewers)) as executor:
+            return list(
+                executor.map(
+                    lambda reviewer: self._evaluate_with_reviewer(
+                        reviewer,
+                        prompt,
+                        iteration=iteration,
+                    ),
+                    reviewers,
+                )
+            )
 
     def _effective_reviewer_models(self) -> list[str]:
         if self.reviewer_models is not None:
@@ -124,14 +150,29 @@ class Evaluator:
             return [self.model.strip()]
         return ["gpt-5.5", "claude-opus-4-7"]
 
+    def _effective_reviewers(self) -> list[ReviewerSpec]:
+        reviewers = [
+            ReviewerSpec.from_model(model)
+            for model in self._effective_reviewer_models()
+        ]
+        for reviewer in self.additional_reviewers:
+            try:
+                reviewers.append(reviewer.with_loaded_profile())
+            except OSError as exc:
+                raise RuntimeError(
+                    f"Evaluator profile for {reviewer.name} is not readable: "
+                    f"{reviewer.profile_path}"
+                ) from exc
+        return reviewers
+
     def _evaluate_with_reviewer(
-        self, reviewer_model: str, prompt: str, *, iteration: int
+        self, reviewer: ReviewerSpec, prompt: str, *, iteration: int
     ) -> ReviewResult:
-        raw = self._call_llm(prompt, reviewer_model)
+        raw = self._call_llm(_prompt_for_reviewer(prompt, reviewer), reviewer.model)
         result = ReviewResult.from_dict(_extract_json_object(raw), iteration=iteration)
-        result.reviewer = reviewer_model
+        result.reviewer = reviewer.name
         for comment in result.comments:
-            comment.reviewer = comment.reviewer or reviewer_model
+            comment.reviewer = comment.reviewer or reviewer.name
         return self._apply_verdict_rules(result)
 
     def _aggregate_reviewer_results(
@@ -250,6 +291,26 @@ class Evaluator:
         if provider == "openai":
             return _call_openai(model, prompt)
         raise RuntimeError(f"Unsupported evaluator model/provider: {self.model}")
+
+
+def _prompt_for_reviewer(prompt: str, reviewer: ReviewerSpec) -> str:
+    if not reviewer.profile_text:
+        return prompt
+    return f"""\
+{prompt}
+
+## Additional Reviewer Profile: {reviewer.name}
+
+You are the `{reviewer.name}` evaluator. Apply the same required JSON schema and
+the same scoring rules above. Use the profile below to shape the review focus,
+comment phrasing, and approval strictness, while grounding every comment in the
+actual issue, repro, report, diff, and lint evidence. Do not claim to be this
+person; this is a style and review-priority profile for an automated evaluator.
+
+```markdown
+{reviewer.profile_text}
+```
+"""
 
 
 def _infer_provider_and_model(model: str) -> tuple[str, str]:

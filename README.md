@@ -150,6 +150,28 @@ By default every diff is reviewed by two reviewer models:
 The diff is not considered ready for human review unless both reviewers score it
 above the configured approval threshold.
 
+You can add a profile-backed reviewer as a third required evaluator. First
+generate the profile from GitHub review history:
+
+```bash
+uv run ptq generate-review-profile aditvenk --repo pytorch/pytorch --months 6
+```
+
+Then include it in orchestration:
+
+```bash
+uv run ptq orchestrate \
+  --issue 166156 \
+  --add-evaluator aditvenk-style \
+  --profile aditvenk \
+  --agent gpt-5.5
+```
+
+`--profile aditvenk` resolves to
+`~/.ptq/evaluator_profiles/aditvenk.md`. The added evaluator uses the same
+approval threshold as the built-in reviewers, so the diff is ready only when all
+configured reviewers approve.
+
 Run evaluator standalone on an existing job:
 
 ```bash
@@ -376,6 +398,9 @@ watch_pr_idle_hours = 24
 
 [evaluator]
 models = ["gpt-5.5", "claude-opus-4-7"]
+# additional_reviewers = [
+#   { name = "aditvenk-style", profile = "aditvenk", model = "gpt-5.5" },
+# ]
 approval_threshold = 0.8
 shelve_threshold = 0.3
 max_iterations = 5

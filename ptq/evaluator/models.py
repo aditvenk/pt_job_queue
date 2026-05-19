@@ -95,3 +95,29 @@ class ReviewResult:
             summary=str(data.get("summary") or ""),
             reviewer=str(data.get("reviewer") or ""),
         )
+
+
+@dataclass(frozen=True)
+class ReviewerSpec:
+    name: str
+    model: str
+    profile_path: str = ""
+    profile_text: str = ""
+
+    @classmethod
+    def from_model(cls, model: str) -> "ReviewerSpec":
+        model = model.strip()
+        return cls(name=model, model=model)
+
+    def with_loaded_profile(self) -> "ReviewerSpec":
+        if self.profile_text or not self.profile_path:
+            return self
+        from pathlib import Path
+
+        path = Path(self.profile_path).expanduser()
+        return ReviewerSpec(
+            name=self.name,
+            model=self.model,
+            profile_path=str(path),
+            profile_text=path.read_text(),
+        )

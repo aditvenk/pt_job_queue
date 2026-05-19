@@ -933,6 +933,47 @@ def _evaluator_models(evaluator_section: dict) -> list[str]:
     return ["gpt-5.5", "claude-opus-4-7"]
 
 
+def _additional_evaluator_specs(
+    evaluator_section: dict,
+    *,
+    add_evaluator: str | None = None,
+    profile: str | None = None,
+    agent: str | None = None,
+):
+    from ptq.evaluator import ReviewerSpec
+    from ptq.evaluator.reviewer_profile import DEFAULT_PROFILE_MODEL, reviewer_profile_path
+
+    specs: list[ReviewerSpec] = []
+    raw_reviewers = evaluator_section.get("additional_reviewers")
+    if isinstance(raw_reviewers, list):
+        for item in raw_reviewers:
+            if not isinstance(item, dict):
+                continue
+            name = str(item.get("name") or item.get("profile") or "").strip()
+            profile_value = str(item.get("profile") or "").strip()
+            model = str(item.get("model") or DEFAULT_PROFILE_MODEL).strip()
+            if name and profile_value and model:
+                specs.append(
+                    ReviewerSpec(
+                        name=name,
+                        model=model,
+                        profile_path=str(reviewer_profile_path(profile_value)),
+                    )
+                )
+
+    if add_evaluator:
+        if not profile:
+            raise typer.BadParameter("--add-evaluator requires --profile.")
+        specs.append(
+            ReviewerSpec(
+                name=add_evaluator,
+                model=agent or DEFAULT_PROFILE_MODEL,
+                profile_path=str(reviewer_profile_path(profile)),
+            )
+        )
+    return specs
+
+
 def _orchestrate_report_display(job_id: str | None) -> str | None:
     if not job_id:
         return None
@@ -1042,6 +1083,7 @@ def evaluate(
     evaluator_section = cfg.evaluator
     evaluator = Evaluator(
         reviewer_models=_evaluator_models(evaluator_section),
+        additional_reviewers=_additional_evaluator_specs(evaluator_section),
         approval_threshold=float(evaluator_section.get("approval_threshold", 0.8)),
         shelve_threshold=float(evaluator_section.get("shelve_threshold", 0.3)),
         max_iterations=int(evaluator_section.get("max_iterations", 5)),
@@ -1075,6 +1117,52 @@ def evaluate(
         f"cat > {job_dir}/review.json << 'PTQ_REVIEW_EOF'\n{review_text}\nPTQ_REVIEW_EOF"
     )
     console.print(review_text)
+
+
+@app.command("generate-review-profile")
+def generate_review_profile(
+    username: Annotated[
+        str,
+        typer.Argument(help="GitHub username to model, e.g. aditvenk."),
+    ],
+    repo: Annotated[
+        str,
+        typer.Option("--repo", help="GitHub repo to scan for reviewed PRs."),
+    ] = "pytorch/pytorch",
+    months: Annotated[
+        int,
+        typer.Option(
+            "--months",
+            help="How many months of reviewed PR activity to scan.",
+        ),
+    ] = 6,
+    limit: Annotated[
+        int,
+        typer.Option(help="Maximum reviewed PRs to inspect."),
+    ] = 100,
+    output: Annotated[
+        Path | None,
+        typer.Option(help="Profile markdown output path."),
+    ] = None,
+) -> None:
+    """Generate a Markdown evaluator profile from a user's GitHub reviews."""
+    from ptq.evaluator.reviewer_profile import generate_reviewer_profile
+
+    try:
+        profile = generate_reviewer_profile(
+            username,
+            repo=repo,
+            months=months,
+            limit=limit,
+            output=output,
+        )
+    except PtqError as e:
+        _handle_error(e)
+    console.print(
+        f"Wrote reviewer profile for @{profile.username}: {profile.path}",
+        soft_wrap=True,
+    )
+    console.print(f"  sampled PRs={profile.pr_count} comments={profile.comment_count}")
 
 
 @app.command()
@@ -1162,6 +1250,30 @@ def orchestrate(
             help="Stop --watch-pr after this many hours without PR activity.",
         ),
     ] = None,
+    add_evaluator: Annotated[
+        str | None,
+        typer.Option(
+            "--add-evaluator",
+            help="Add a profile-backed evaluator reviewer name.",
+        ),
+    ] = None,
+    evaluator_profile: Annotated[
+        str | None,
+        typer.Option(
+            "--profile",
+            help=(
+                "GitHub username or markdown profile path for --add-evaluator. "
+                "Username profiles resolve under ~/.ptq/evaluator_profiles/."
+            ),
+        ),
+    ] = None,
+    evaluator_agent: Annotated[
+        str | None,
+        typer.Option(
+            "--agent",
+            help="Model used by --add-evaluator; defaults to gpt-5.5 via Codex.",
+        ),
+    ] = None,
 ) -> None:
     """Run the issue-selection, solver, evaluator hill-climbing loop."""
     from ptq.config import load_config
@@ -1240,6 +1352,12 @@ def orchestrate(
 
     evaluator = Evaluator(
         reviewer_models=_evaluator_models(evaluator_cfg),
+        additional_reviewers=_additional_evaluator_specs(
+            evaluator_cfg,
+            add_evaluator=add_evaluator,
+            profile=evaluator_profile,
+            agent=evaluator_agent,
+        ),
         approval_threshold=float(evaluator_cfg.get("approval_threshold", 0.8)),
         shelve_threshold=float(evaluator_cfg.get("shelve_threshold", 0.3)),
         max_iterations=int(evaluator_cfg.get("max_iterations", config.max_iterations)),
