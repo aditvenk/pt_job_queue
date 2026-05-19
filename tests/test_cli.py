@@ -614,6 +614,67 @@ def test_orchestrate_no_follow_and_pr_flag():
     assert captured["config"].push_pr is True
 
 
+def test_orchestrate_repo_flag_selects_supported_repo_profile():
+    captured = {}
+
+    class FakeEvaluator:
+        def __init__(self, **kwargs):
+            pass
+
+    class FakeOrchestrator:
+        def __init__(self, config, **kwargs):
+            captured["config"] = config
+
+        async def run(self):
+            return []
+
+    with (
+        patch("ptq.config.load_config", return_value=_fake_orchestrate_config()),
+        patch("ptq.evaluator.Evaluator", FakeEvaluator),
+        patch("ptq.orchestrator.Orchestrator", FakeOrchestrator),
+    ):
+        result = runner.invoke(
+            app,
+            ["orchestrate", "--repo", "torchtitan", "--issue", "123"],
+        )
+
+    assert result.exit_code == 0, result.output
+    assert captured["config"].repo == "torchtitan"
+    assert captured["config"].github_repo == "pytorch/torchtitan"
+    assert (
+        captured["config"].issue_selection_prompt
+        == "https://github.com/pytorch/torchtitan/issues/123"
+    )
+
+
+def test_orchestrate_infers_repo_from_configured_github_repo():
+    captured = {}
+    cfg = _fake_orchestrate_config()
+    cfg.orchestrator["github_repo"] = "pytorch/torchtitan"
+
+    class FakeEvaluator:
+        def __init__(self, **kwargs):
+            pass
+
+    class FakeOrchestrator:
+        def __init__(self, config, **kwargs):
+            captured["config"] = config
+
+        async def run(self):
+            return []
+
+    with (
+        patch("ptq.config.load_config", return_value=cfg),
+        patch("ptq.evaluator.Evaluator", FakeEvaluator),
+        patch("ptq.orchestrator.Orchestrator", FakeOrchestrator),
+    ):
+        result = runner.invoke(app, ["orchestrate", "--issue", "123"])
+
+    assert result.exit_code == 0, result.output
+    assert captured["config"].repo == "torchtitan"
+    assert captured["config"].github_repo == "pytorch/torchtitan"
+
+
 def test_orchestrate_uses_config_max_issues_for_prompt_selection():
     captured = {}
 
@@ -643,3 +704,4 @@ def test_orchestrate_has_no_max_issues_flag():
     result = runner.invoke(app, ["orchestrate", "--help"])
     assert result.exit_code == 0, result.output
     assert "--max-issues" not in result.output
+    assert "--repo" in result.output

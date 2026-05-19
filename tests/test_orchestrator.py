@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from subprocess import CompletedProcess
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -160,6 +161,55 @@ def test_solve_issue_injects_pr_feedback_when_present(tmp_path):
     assert captured["pr_feedback"]["comments"][0]["body"] == (
         "Please handle the no_grad case."
     )
+
+
+def test_launch_solver_uses_configured_repo_profile(tmp_path):
+    captured = {}
+
+    class FakeJobRepo:
+        def find_by_issue(self, issue, *, machine, local, repo):
+            captured["find_by_issue"] = {
+                "issue": issue,
+                "machine": machine,
+                "local": local,
+                "repo": repo,
+            }
+            return None
+
+    class FakeBackend:
+        workspace = "~/.ptq_workspace"
+
+        def run(self, cmd, check=True):
+            assert cmd == "date +%s"
+            return CompletedProcess("", 0, "123\n", "")
+
+    def fake_launch(job_repo, backend, request):
+        captured["request"] = request
+        return "job-1"
+
+    orchestrator = Orchestrator(
+        OrchestratorConfig(
+            issue_selection_prompt="open bugs",
+            repo="torchtitan",
+            github_repo="pytorch/torchtitan",
+            log_path=tmp_path / "runs.jsonl",
+        ),
+        job_repo=FakeJobRepo(),
+    )
+    with (
+        patch("ptq.orchestrator.orchestrator.create_backend", return_value=FakeBackend()),
+        patch("ptq.orchestrator.orchestrator.run_service.launch", fake_launch),
+    ):
+        job_id = asyncio.run(
+            orchestrator._launch_solver(
+                Issue(number=123, title="bug", raw={"number": 123}),
+                review=None,
+            )
+        )
+
+    assert job_id == "job-1"
+    assert captured["find_by_issue"]["repo"] == "torchtitan"
+    assert captured["request"].repo == "torchtitan"
 
 
 def test_pr_feedback_snapshot_includes_failing_ci():

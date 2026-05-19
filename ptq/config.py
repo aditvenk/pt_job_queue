@@ -79,6 +79,7 @@ USE_NNPACK = "0"
 # USE_SYSTEM_NCCL = "1"
 
 [orchestrator]
+repo = "pytorch"
 github_repo = "pytorch/pytorch"
 issue_selection_prompt = "open issues labeled 'module: nn' with a repro script, filed in the last 30 days"
 max_issues = 20

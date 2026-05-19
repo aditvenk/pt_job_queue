@@ -23,6 +23,9 @@ Run all commands from this repo with `uv run ptq ...`.
 # One-time local workspace setup, if you have not already done it.
 uv run ptq setup --local
 
+# Include supported add-on repos when you want to orchestrate them.
+uv run ptq setup --local --extras torchtitan
+
 # Dry-run issue selection without launching agents.
 uv run ptq orchestrate \
   --issue 76449 \
@@ -68,6 +71,9 @@ Examples:
 # Run one explicit issue.
 uv run ptq orchestrate --issue 166156 --machine localhost
 
+# Run one explicit issue from another supported repo profile.
+uv run ptq orchestrate --repo torchtitan --issue 1234 --machine localhost
+
 # Run one explicit issue and update/create a draft PR after approval.
 uv run ptq orchestrate --issue 166156 --machine localhost --pr
 
@@ -91,7 +97,8 @@ Useful flags:
 
 | Flag | Meaning |
 | --- | --- |
-| `--issue N` | Run one explicit PyTorch issue. |
+| `--repo NAME` | PTQ repo profile to run against, such as `pytorch` or `torchtitan`; default comes from config. |
+| `--issue N` | Run one explicit issue in the selected repo. |
 | `--prompt TEXT` | Natural-language GitHub issue selection criteria. |
 | `--parallel N` | Number of concurrent solver/evaluator loops. |
 | `--max-iterations N` | Max solver/evaluator iterations per issue. |
@@ -344,6 +351,7 @@ rm -f ~/.ptq/github_harness.sock
 
 ```toml
 [orchestrator]
+repo = "pytorch"
 github_repo = "pytorch/pytorch"
 issue_selection_prompt = "open issues labeled 'module: nn' with a repro script, filed in the last 30 days"
 max_issues = 20

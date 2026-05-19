@@ -1054,6 +1054,13 @@ def orchestrate(
             help="Natural-language GitHub issue selection criteria.",
         ),
     ] = None,
+    repo: Annotated[
+        str | None,
+        typer.Option(
+            "--repo",
+            help="PTQ repo profile to run against, e.g. pytorch or torchtitan.",
+        ),
+    ] = None,
     parallel: Annotated[int | None, typer.Option(help="Concurrent solver jobs.")] = None,
     machine: Annotated[
         str | None,
@@ -1096,12 +1103,30 @@ def orchestrate(
     from ptq.config import load_config
     from ptq.evaluator import Evaluator
     from ptq.orchestrator import Orchestrator, OrchestratorConfig
+    from ptq.repo_profiles import get_profile, profile_name_for_github_repo
 
     cfg = load_config()
     orch = cfg.orchestrator
     evaluator_cfg = cfg.evaluator
+    configured_github_repo = str(orch.get("github_repo") or "")
+    configured_repo = str(orch.get("repo") or "")
+    repo_name = (
+        repo
+        or configured_repo
+        or profile_name_for_github_repo(configured_github_repo)
+        or "pytorch"
+    )
+    try:
+        profile = get_profile(repo_name)
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    github_repo = (
+        profile.github_repo
+        if repo is not None or configured_repo
+        else configured_github_repo or profile.github_repo
+    )
     issue_prompt = (
-        f"https://github.com/{orch.get('github_repo', 'pytorch/pytorch')}/issues/{issue}"
+        f"https://github.com/{github_repo}/issues/{issue}"
         if issue is not None
         else prompt or str(orch.get("issue_selection_prompt") or "")
     )
@@ -1119,7 +1144,8 @@ def orchestrate(
 
     config = OrchestratorConfig(
         issue_selection_prompt=issue_prompt,
-        github_repo=str(orch.get("github_repo", "pytorch/pytorch")),
+        repo=repo_name,
+        github_repo=github_repo,
         max_issues=max_issues_value,
         parallel=parallel_value,
         max_iterations=int(max_iterations or orch.get("max_iterations", 5)),

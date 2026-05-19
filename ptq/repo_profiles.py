@@ -118,6 +118,26 @@ def get_profile(name: str) -> RepoProfile:
     return profile
 
 
+def _normalize_github_repo(value: str) -> str:
+    normalized = value.strip()
+    if normalized.startswith("https://github.com/"):
+        normalized = normalized.removeprefix("https://github.com/")
+    if normalized.startswith("git@github.com:"):
+        normalized = normalized.removeprefix("git@github.com:")
+    normalized = normalized.removesuffix(".git").strip("/")
+    return normalized.lower()
+
+
+def profile_name_for_github_repo(github_repo: str) -> str | None:
+    wanted = _normalize_github_repo(github_repo)
+    if not wanted:
+        return None
+    for name, profile in _loaded_profiles().items():
+        if _normalize_github_repo(profile.github_repo) == wanted:
+            return name
+    return None
+
+
 def available_repos() -> list[str]:
     return list(_loaded_profiles())
 

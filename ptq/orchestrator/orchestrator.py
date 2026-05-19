@@ -262,7 +262,7 @@ class Orchestrator:
             agent_type=self.config.solver_agent,
             existing_job_id=existing_job_id,
             name=f"orchestrator-{issue.number}",
-            repo="pytorch",
+            repo=self.config.repo,
             review_feedback_json=review_feedback_json,
         )
         launch_time_result = await asyncio.to_thread(backend.run, "date +%s", False)
@@ -284,7 +284,7 @@ class Orchestrator:
             issue.number,
             machine=None if self.config.local else self.config.machine,
             local=self.config.local,
-            repo="pytorch",
+            repo=self.config.repo,
         )
 
     async def _fetch_pr_feedback(self, issue: Issue) -> dict | None:
