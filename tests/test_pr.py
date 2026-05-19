@@ -7,7 +7,13 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from ptq.application import pr_service
-from ptq.application.pr_service import _build_pr_body, _ensure_ssh_remote, create_pr
+from ptq.application.pr_service import (
+    _build_commit_message,
+    _build_pr_body,
+    _ensure_ssh_remote,
+    create_pr,
+    fetch_pr_feedback,
+)
 from ptq.domain.models import JobRecord, PtqError
 from ptq.infrastructure.job_repository import JobRepository
 
@@ -52,18 +58,47 @@ class TestBuildPrBody:
         assert lines[1] == "Trivial fix"
         assert "Fixes #42" in body
 
-    def test_with_report(self):
-        body = _build_pr_body("Report here", "", "", issue_number=42, human_note="Note")
-        assert "Report here" in body
-        assert "Agent Report" in body
+    def test_agent_report_keeps_useful_sections(self):
+        report = """# Issue
 
-    def test_with_worklog(self):
+## Summary
+Short summary.
+
+## Root cause
+Root cause details.
+
+## Fix
+Fix details.
+
+## Repro
+Reporter repro details.
+
+## Test results
+A new regression test was added.
+"""
+        body = _build_pr_body(
+            report,
+            "",
+            "print('repro')",
+            issue_number=42,
+            human_note="Note",
+            status={"repro_file": "repro_42_generated.py"},
+        )
+        assert "## Agent Report" in body
+        assert "### Summary\nShort summary." in body
+        assert "### Root Cause\nRoot cause details." in body
+        assert "### Fix\nFix details." in body
+        assert "### Repro" in body
+        assert "python repro_42_generated.py" in body
+        assert "print('repro')" in body
+        assert "### Testing\nA new regression test was added." in body
+
+    def test_does_not_dump_worklog(self):
         body = _build_pr_body(
             "Report", "log entries", "", issue_number=None, human_note="N"
         )
-        assert "<details>" in body
-        assert "log entries" in body
-        assert "Agent Worklog" in body
+        assert "log entries" not in body
+        assert "Agent Worklog" not in body
 
     def test_no_agent_content(self):
         body = _build_pr_body("", "", "", issue_number=None, human_note="Manual fix")
@@ -74,22 +109,78 @@ class TestBuildPrBody:
         body = _build_pr_body("R", "", "", issue_number=99, human_note="Fix")
         assert "Fixes #99" in body
 
-    def test_with_repro(self):
+    def test_repro_is_in_pr_body_not_separate_comment(self):
         body = _build_pr_body(
             "R",
             "",
             "import torch\nprint(torch.__version__)",
             issue_number=42,
             human_note="Fix",
+            repro_filename="repro_42_generated.py",
         )
-        assert "<details>" in body
+        assert "### Repro" in body
+        assert "python repro_42_generated.py" in body
         assert "Repro Script" in body
         assert "import torch" in body
-        assert "```python" in body
 
     def test_no_repro(self):
         body = _build_pr_body("R", "", "", issue_number=42, human_note="Fix")
-        assert "Repro Script" not in body
+        assert "```bash\npython repro.py\n```" in body
+
+    def test_includes_status_summary_and_files_changed(self):
+        body = _build_pr_body(
+            "Long report",
+            "Long worklog",
+            "",
+            issue_number=42,
+            human_note="Note",
+            status={
+                "summary": "Preserve Parameter-ness in DTensor.to_local().",
+                "files_changed": [
+                    "torch/distributed/tensor/_api.py",
+                    "test/distributed/tensor/test_dtensor.py",
+                ],
+            },
+        )
+        assert "## Agent Report" in body
+        assert "Preserve Parameter-ness in DTensor.to_local()." in body
+        assert "- `torch/distributed/tensor/_api.py`" in body
+        assert "- `test/distributed/tensor/test_dtensor.py`" in body
+
+    def test_status_summary_omits_iteration_and_reviewer_chatter(self):
+        body = _build_pr_body(
+            "",
+            "",
+            "",
+            issue_number=42,
+            human_note="Note",
+            status={
+                "summary": (
+                    "DTensor.to_local dropped _is_param. Fix stamps _is_param "
+                    "on the returned tensor. Run 4 addresses evaluator feedback: "
+                    "gpt-5.5 blocking and claude-opus-4-7 nit. spin fixlint clean."
+                )
+            },
+        )
+        assert "DTensor.to_local dropped _is_param." in body
+        assert "Fix stamps _is_param on the returned tensor." in body
+        assert "Run 4" not in body
+        assert "gpt-5.5" not in body
+        assert "claude-opus" not in body
+
+
+class TestBuildCommitMessage:
+    def test_includes_summary_and_fixes_footer(self):
+        message = _build_commit_message(
+            "Fix #42",
+            issue_number=42,
+            human_note="Human note",
+            report="The reducer now reports mismatched parameter shapes.",
+            status={"summary": "Validate parameter metadata across ranks."},
+        )
+        assert message.startswith("Fix #42\n\nSummary:\n")
+        assert "- Validate parameter metadata across ranks." in message
+        assert message.rstrip().endswith("Fixes #42")
 
 
 class TestEnsureSshRemote:
@@ -166,6 +257,19 @@ class TestCreatePr:
                 repo, "20260217-42", human_note="Note", title="Custom Title"
             )
         assert result.branch == "ptq/42"
+
+    def test_default_title_does_not_reference_issue_number(self, tmp_path):
+        repo, backend = self._setup(tmp_path)
+        with patch("ptq.application.pr_service.backend_for_job", return_value=backend):
+            create_pr(repo, "20260217-42", human_note="Trivial fix")
+        create_calls = [
+            call
+            for call in backend.run.call_args_list
+            if "gh pr create" in str(call)
+        ]
+        assert len(create_calls) == 1
+        assert "Fix #42" not in str(create_calls[0])
+        assert "Fix from PTQ job 20260217-42" in str(create_calls[0])
 
     def test_updates_known_open_pr(self, tmp_path):
         repo, backend = self._setup(tmp_path)
@@ -277,3 +381,445 @@ class TestCreatePr:
         ]
         assert len(push_calls) == 1
         assert "--force" not in str(push_calls[0])
+
+    def test_pr_create_is_always_draft(self, tmp_path):
+        repo, backend = self._setup(tmp_path)
+        with patch("ptq.application.pr_service.backend_for_job", return_value=backend):
+            create_pr(repo, "20260217-42", human_note="Trivial fix", draft=False)
+        create_calls = [
+            call
+            for call in backend.run.call_args_list
+            if "gh pr create" in str(call)
+        ]
+        assert len(create_calls) == 1
+        assert "--draft" in str(create_calls[0])
+
+    def test_gh_pr_create_gets_proxy_env_prefix(self, tmp_path):
+        repo, backend = self._setup(tmp_path)
+        with (
+            patch("ptq.application.pr_service.backend_for_job", return_value=backend),
+            patch.dict(
+                "os.environ",
+                {
+                    "PATH": "/usr/bin",
+                    "HOME": "/tmp",
+                },
+                clear=True,
+            ),
+        ):
+            create_pr(repo, "20260217-42", human_note="Trivial fix")
+        create_calls = [
+            call
+            for call in backend.run.call_args_list
+            if "gh pr create" in str(call)
+        ]
+        assert len(create_calls) == 1
+        call_text = str(create_calls[0])
+        assert "https_proxy=http://fwdproxy:8080" in call_text
+        assert "HTTPS_PROXY=http://fwdproxy:8080" in call_text
+
+    def test_commit_uses_file_with_fixes_footer(self, tmp_path):
+        repo, backend = self._setup(tmp_path)
+
+        def run_side_effect(cmd, check=True):
+            if "git diff --cached --quiet" in cmd:
+                return CompletedProcess("", 1, "", "")
+            if "git remote get-url" in cmd:
+                return CompletedProcess("", 0, "git@github.com:pytorch/pytorch.git\n")
+            if "gh pr create" in cmd:
+                return CompletedProcess(
+                    "", 0, "https://github.com/pytorch/pytorch/pull/99\n"
+                )
+            return CompletedProcess("", 0, "")
+
+        backend.run = MagicMock(side_effect=run_side_effect)
+        with patch("ptq.application.pr_service.backend_for_job", return_value=backend):
+            create_pr(repo, "20260217-42", human_note="Trivial fix")
+        commit_calls = [
+            call
+            for call in backend.run.call_args_list
+            if "git commit -F" in str(call)
+        ]
+        assert len(commit_calls) == 1
+        printf_calls = [
+            call
+            for call in backend.run.call_args_list
+            if "printf %s" in str(call)
+        ]
+        assert len(printf_calls) == 1
+        assert "Fixes #42" in str(printf_calls[0])
+
+    def test_deletes_old_separate_repro_script_comment(self, tmp_path):
+        repo, backend = self._setup(tmp_path)
+
+        def run_side_effect(cmd, check=True):
+            if "cat ~/ptq_workspace/jobs/20260217-42/status.json" in cmd:
+                return CompletedProcess(
+                    "",
+                    0,
+                    '{"repro_file": "repro_42.py", "repro_source": "from_issue"}',
+                    "",
+                )
+            if "cat ~/ptq_workspace/jobs/20260217-42/repro_42.py" in cmd:
+                return CompletedProcess("", 0, "print('from issue')", "")
+            if "cat ~/ptq_workspace/jobs/20260217-42/" in cmd:
+                return CompletedProcess("", 1, "", "")
+            if "git remote get-url" in cmd:
+                return CompletedProcess("", 0, "git@github.com:pytorch/pytorch.git\n")
+            if "gh pr create" in cmd:
+                return CompletedProcess(
+                    "", 0, "https://github.com/pytorch/pytorch/pull/99\n"
+                )
+            if "gh api repos/pytorch/pytorch/issues/99/comments" in cmd:
+                return CompletedProcess(
+                    "",
+                    0,
+                    '[{"id": 123, "body": "<!-- ptq:repro-script -->\\nold"}]',
+                    "",
+                )
+            if "gh api -X DELETE repos/pytorch/pytorch/issues/comments/123" in cmd:
+                return CompletedProcess("", 0, "", "")
+            return CompletedProcess("", 0, "")
+
+        backend.run = MagicMock(side_effect=run_side_effect)
+        with patch("ptq.application.pr_service.backend_for_job", return_value=backend):
+            create_pr(repo, "20260217-42", human_note="Trivial fix")
+        comment_calls = [
+            call
+            for call in backend.run.call_args_list
+            if "gh pr comment" in str(call)
+        ]
+        assert not comment_calls
+        delete_calls = [
+            call
+            for call in backend.run.call_args_list
+            if "gh api -X DELETE repos/pytorch/pytorch/issues/comments/123" in str(call)
+        ]
+        assert len(delete_calls) == 1
+        create_calls = [
+            call
+            for call in backend.run.call_args_list
+            if "gh pr create" in str(call)
+        ]
+        command = create_calls[0].args[0]
+        assert "python repro_42.py" in command
+        assert "from issue" in command
+
+    def test_fetches_pr_feedback_from_existing_open_pr(self, tmp_path):
+        repo, backend = self._setup(tmp_path)
+        job = repo.get("20260217-42")
+        job.pr_url = "https://github.com/pytorch/pytorch/pull/99"
+        repo.save(job)
+
+        def run_side_effect(cmd, check=True):
+            if "gh pr view" in cmd:
+                return CompletedProcess("", 0, "OPEN\t\n", "")
+            if "gh api repos/pytorch/pytorch/issues/99/comments" in cmd:
+                return CompletedProcess(
+                    "",
+                    0,
+                    (
+                        '[{"body": "Please add a regression test.", '
+                        '"id": 111, '
+                        '"user": {"login": "reviewer"}, '
+                        '"html_url": "https://github.com/pytorch/pytorch/pull/99#issuecomment-1"},'
+                        '{"body": "<!-- ptq:repro-script -->\\nold", '
+                        '"user": {"login": "bot"}},'
+                        '{"body": "[bot] Resolved in latest update.", '
+                        '"id": 112, "user": {"login": "ptq-bot"}}]'
+                    ),
+                    "",
+                )
+            if "gh api repos/pytorch/pytorch/pulls/99/comments" in cmd:
+                return CompletedProcess(
+                    "",
+                    0,
+                    (
+                        '[{"body": "This misses the no_grad case.", '
+                        '"id": 222, '
+                        '"path": "torch/foo.py", "line": 12, '
+                        '"user": {"login": "reviewer2"}}]'
+                    ),
+                    "",
+                )
+            if "gh api repos/pytorch/pytorch/pulls/99/reviews" in cmd:
+                return CompletedProcess(
+                    "",
+                    0,
+                    '[{"body": "Changes requested.", "id": 333, '
+                    '"state": "CHANGES_REQUESTED", '
+                    '"user": {"login": "reviewer3"}}]',
+                    "",
+                )
+            if "gh pr checks https://github.com/pytorch/pytorch/pull/99" in cmd:
+                return CompletedProcess(
+                    "",
+                    1,
+                    (
+                        '[{"name": "linux-test", "bucket": "fail", '
+                        '"state": "FAILURE", "workflow": "pull", '
+                        '"description": "test failed", '
+                        '"link": "https://github.com/pytorch/pytorch/actions/runs/1"},'
+                        '{"name": "lint", "bucket": "pass", "state": "SUCCESS"}]'
+                    ),
+                    "",
+                )
+            if "gh run view 1 --repo pytorch/pytorch --log-failed" in cmd:
+                return CompletedProcess(
+                    "",
+                    0,
+                    "linux-test\tRun tests\tFAILED test_dtensor.py::test_case",
+                    "",
+                )
+            return CompletedProcess("", 0, "")
+
+        backend.run = MagicMock(side_effect=run_side_effect)
+        with patch("ptq.application.pr_service.backend_for_job", return_value=backend):
+            feedback = fetch_pr_feedback(repo, "20260217-42")
+
+        assert feedback is not None
+        assert feedback["pr_url"] == "https://github.com/pytorch/pytorch/pull/99"
+        assert len(feedback["comments"]) == 3
+        assert feedback["comments"][0]["kind"] == "conversation"
+        assert feedback["comments"][0]["id"] == 111
+        assert feedback["comments"][1]["path"] == "torch/foo.py"
+        assert feedback["comments"][2]["state"] == "CHANGES_REQUESTED"
+        assert all("ptq:repro-script" not in c["body"] for c in feedback["comments"])
+        assert all(not c["body"].startswith("[bot]") for c in feedback["comments"])
+        assert len(feedback["ci_failures"]) == 1
+        assert feedback["ci_failures"][0]["name"] == "linux-test"
+        assert feedback["ci_failures"][0]["link"].endswith("/actions/runs/1")
+        assert "FAILED test_dtensor.py::test_case" in feedback["ci_failures"][0][
+            "failed_log_excerpt"
+        ]
+
+    def test_fetches_pr_feedback_when_only_ci_is_failing(self, tmp_path):
+        repo, backend = self._setup(tmp_path)
+        job = repo.get("20260217-42")
+        job.pr_url = "https://github.com/pytorch/pytorch/pull/99"
+        repo.save(job)
+
+        def run_side_effect(cmd, check=True):
+            if "gh pr view" in cmd:
+                return CompletedProcess("", 0, "OPEN\t\n", "")
+            if "gh api repos/pytorch/pytorch/issues/99/comments" in cmd:
+                return CompletedProcess("", 0, "[]", "")
+            if "gh api repos/pytorch/pytorch/pulls/99/comments" in cmd:
+                return CompletedProcess("", 0, "[]", "")
+            if "gh api repos/pytorch/pytorch/pulls/99/reviews" in cmd:
+                return CompletedProcess("", 0, "[]", "")
+            if "gh pr checks https://github.com/pytorch/pytorch/pull/99" in cmd:
+                return CompletedProcess(
+                    "",
+                    1,
+                    '[{"name": "distributed / test", "bucket": "fail", '
+                    '"state": "FAILURE", "description": "Timeout", '
+                    '"link": "https://github.com/pytorch/pytorch/actions/runs/2"}]',
+                    "",
+                )
+            if "gh run view 2 --repo pytorch/pytorch --log-failed" in cmd:
+                return CompletedProcess("", 0, "distributed test timed out", "")
+            return CompletedProcess("", 0, "")
+
+        backend.run = MagicMock(side_effect=run_side_effect)
+        with patch("ptq.application.pr_service.backend_for_job", return_value=backend):
+            feedback = fetch_pr_feedback(repo, "20260217-42")
+
+        assert feedback is not None
+        assert feedback["comments"] == []
+        assert feedback["ci_failures"][0]["name"] == "distributed / test"
+        assert "distributed test timed out" in feedback["ci_failures"][0][
+            "failed_log_excerpt"
+        ]
+        assert "failing PR check" in feedback["summary"]
+
+    def test_fetches_pr_feedback_by_branch_when_job_has_no_pr_url(self, tmp_path):
+        repo, backend = self._setup(tmp_path)
+
+        def run_side_effect(cmd, check=True):
+            if "gh pr list" in cmd:
+                return CompletedProcess(
+                    "", 0, "https://github.com/pytorch/pytorch/pull/88\n", ""
+                )
+            if "gh api repos/pytorch/pytorch/issues/88/comments" in cmd:
+                return CompletedProcess(
+                    "",
+                    0,
+                    '[{"body": "Address this comment.", "user": {"login": "human"}}]',
+                    "",
+                )
+            if "gh api repos/pytorch/pytorch/pulls/88/comments" in cmd:
+                return CompletedProcess("", 0, "[]", "")
+            if "gh api repos/pytorch/pytorch/pulls/88/reviews" in cmd:
+                return CompletedProcess("", 0, "[]", "")
+            return CompletedProcess("", 0, "")
+
+        backend.run = MagicMock(side_effect=run_side_effect)
+        with patch("ptq.application.pr_service.backend_for_job", return_value=backend):
+            feedback = fetch_pr_feedback(repo, "20260217-42")
+
+        assert feedback is not None
+        assert repo.get("20260217-42").pr_url == "https://github.com/pytorch/pytorch/pull/88"
+        assert feedback["comments"][0]["body"] == "Address this comment."
+
+    def test_replies_to_resolved_pr_comments_with_bot_prefix(self, tmp_path):
+        repo, backend = self._setup(tmp_path)
+
+        def run_side_effect(cmd, check=True):
+            if "cat ~/ptq_workspace/jobs/20260217-42/status.json" in cmd:
+                return CompletedProcess(
+                    "",
+                    0,
+                    (
+                        '{"resolved_pr_comments": ['
+                        '{"comment_id": 222, "kind": "inline", '
+                        '"resolution": "Added no_grad coverage."},'
+                        '{"comment_id": 111, "kind": "conversation", '
+                        '"comment_url": "https://github.com/pytorch/pytorch/pull/99#issuecomment-111", '
+                        '"resolution": "Updated the PR description."}'
+                        "]} "
+                    ),
+                    "",
+                )
+            if "cat ~/ptq_workspace/jobs/20260217-42/" in cmd:
+                return CompletedProcess("", 1, "", "")
+            if "git remote get-url" in cmd:
+                return CompletedProcess("", 0, "git@github.com:pytorch/pytorch.git\n")
+            if "gh pr create" in cmd:
+                return CompletedProcess(
+                    "", 0, "https://github.com/pytorch/pytorch/pull/99\n"
+                )
+            if "gh api repos/pytorch/pytorch/issues/99/comments" in cmd:
+                return CompletedProcess("", 0, "[]", "")
+            if "gh api repos/pytorch/pytorch/pulls/99/comments" in cmd:
+                return CompletedProcess("", 0, "[]", "")
+            if "gh api -X POST repos/pytorch/pytorch/pulls/99/comments/222/replies" in cmd:
+                return CompletedProcess("", 0, "", "")
+            if "gh pr comment https://github.com/pytorch/pytorch/pull/99" in cmd:
+                return CompletedProcess("", 0, "", "")
+            return CompletedProcess("", 0, "")
+
+        backend.run = MagicMock(side_effect=run_side_effect)
+        with patch("ptq.application.pr_service.backend_for_job", return_value=backend):
+            create_pr(repo, "20260217-42", human_note="Trivial fix")
+
+        inline_replies = [
+            call
+            for call in backend.run.call_args_list
+            if "gh api -X POST repos/pytorch/pytorch/pulls/99/comments/222/replies"
+            in str(call)
+        ]
+        timeline_replies = [
+            call
+            for call in backend.run.call_args_list
+            if "gh pr comment https://github.com/pytorch/pytorch/pull/99"
+            in str(call)
+        ]
+        assert len(inline_replies) == 1
+        assert len(timeline_replies) == 1
+        assert "[bot] Resolved in the latest update. Added no_grad coverage." in str(
+            inline_replies[0]
+        )
+        assert "[bot] Resolved in the latest update. Updated the PR description." in str(
+            timeline_replies[0]
+        )
+        assert "<!-- ptq:resolution:222 -->" in str(inline_replies[0])
+        assert "<!-- ptq:resolution:111 -->" in str(timeline_replies[0])
+
+    def test_resolution_reply_is_short(self, tmp_path):
+        repo, backend = self._setup(tmp_path)
+        long_resolution = (
+            "Addressed in the diff: torch/distributed/tensor/_api.py now carries "
+            "a long BC paragraph explaining every scenario. The PR description "
+            "also contains extensive analysis that should not be pasted into a "
+            "GitHub comment reply."
+        )
+
+        def run_side_effect(cmd, check=True):
+            if "cat ~/ptq_workspace/jobs/20260217-42/status.json" in cmd:
+                return CompletedProcess(
+                    "",
+                    0,
+                    (
+                        '{"resolved_pr_comments": ['
+                        '{"comment_id": 222, "kind": "inline", '
+                        f'"resolution": {long_resolution!r}'
+                        "}]}"
+                    ).replace("'", '"'),
+                    "",
+                )
+            if "cat ~/ptq_workspace/jobs/20260217-42/" in cmd:
+                return CompletedProcess("", 1, "", "")
+            if "git remote get-url" in cmd:
+                return CompletedProcess("", 0, "git@github.com:pytorch/pytorch.git\n")
+            if "gh pr create" in cmd:
+                return CompletedProcess(
+                    "", 0, "https://github.com/pytorch/pytorch/pull/99\n"
+                )
+            if "gh api repos/pytorch/pytorch/issues/99/comments" in cmd:
+                return CompletedProcess("", 0, "[]", "")
+            if "gh api repos/pytorch/pytorch/pulls/99/comments" in cmd:
+                return CompletedProcess("", 0, "[]", "")
+            return CompletedProcess("", 0, "")
+
+        backend.run = MagicMock(side_effect=run_side_effect)
+        with patch("ptq.application.pr_service.backend_for_job", return_value=backend):
+            create_pr(repo, "20260217-42", human_note="Trivial fix")
+
+        inline_replies = [
+            call
+            for call in backend.run.call_args_list
+            if "gh api -X POST repos/pytorch/pytorch/pulls/99/comments/222/replies"
+            in str(call)
+        ]
+        assert len(inline_replies) == 1
+        reply = str(inline_replies[0])
+        assert "The PR description also contains extensive analysis" not in reply
+        assert "Resolved in the latest update." in reply
+
+    def test_does_not_duplicate_resolution_replies(self, tmp_path):
+        repo, backend = self._setup(tmp_path)
+
+        def run_side_effect(cmd, check=True):
+            if "cat ~/ptq_workspace/jobs/20260217-42/status.json" in cmd:
+                return CompletedProcess(
+                    "",
+                    0,
+                    (
+                        '{"resolved_pr_comments": ['
+                        '{"comment_id": 222, "kind": "inline", '
+                        '"resolution": "Added no_grad coverage."}'
+                        "]}"
+                    ),
+                    "",
+                )
+            if "cat ~/ptq_workspace/jobs/20260217-42/" in cmd:
+                return CompletedProcess("", 1, "", "")
+            if "git remote get-url" in cmd:
+                return CompletedProcess("", 0, "git@github.com:pytorch/pytorch.git\n")
+            if "gh pr create" in cmd:
+                return CompletedProcess(
+                    "", 0, "https://github.com/pytorch/pytorch/pull/99\n"
+                )
+            if "gh api repos/pytorch/pytorch/issues/99/comments" in cmd:
+                return CompletedProcess("", 0, "[]", "")
+            if "gh api repos/pytorch/pytorch/pulls/99/comments" in cmd:
+                return CompletedProcess(
+                    "",
+                    0,
+                    '[{"body": "[bot] Resolved.\\n\\n<!-- ptq:resolution:222 -->"}]',
+                    "",
+                )
+            return CompletedProcess("", 0, "")
+
+        backend.run = MagicMock(side_effect=run_side_effect)
+        with patch("ptq.application.pr_service.backend_for_job", return_value=backend):
+            create_pr(repo, "20260217-42", human_note="Trivial fix")
+
+        inline_replies = [
+            call
+            for call in backend.run.call_args_list
+            if "gh api -X POST repos/pytorch/pytorch/pulls/99/comments/222/replies"
+            in str(call)
+        ]
+        assert not inline_replies

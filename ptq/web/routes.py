@@ -647,7 +647,7 @@ async def job_create_pr(
         job_id,
         human_note=human_note,
         title=title.strip() or None,
-        draft=bool(draft),
+        draft=True,
     )
     log.info("PR created for %s: %s", job_id, result.url)
     return RedirectResponse(url=f"/jobs/{job_id}", status_code=303)
