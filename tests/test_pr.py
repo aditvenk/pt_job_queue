@@ -191,6 +191,22 @@ Tests passed.
         assert long_fix.strip() in body
         assert "details..." not in body
 
+    def test_agent_report_removes_review_provenance_from_pr_body(self):
+        report = """## Test results
+I also added a regression test RedistributeTest.test_shard_to_replicate_local_tensor_contiguous in test/distributed/tensor/test_redistribute.py modeled on the example referenced by @aditvenk on the draft PR (see PR #174134). It iterates over shape cases and asserts local tensor contiguity.
+"""
+        body = _build_pr_body(report, "", "", issue_number=42, human_note="Note")
+        assert (
+            "RedistributeTest.test_shard_to_replicate_local_tensor_contiguous"
+            in body
+        )
+        assert "shape cases" in body
+        assert "@aditvenk" not in body
+        assert "draft PR" not in body
+        assert "PR #174134" not in body
+        assert "modeled on" not in body
+        assert "referenced by" not in body
+
 
 class TestBuildCommitMessage:
     def test_includes_summary_and_fixes_footer(self):

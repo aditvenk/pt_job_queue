@@ -493,9 +493,50 @@ def _append_report_subsection(
     content = content.strip()
     if not content:
         return
+    content = _sanitize_public_report_content(content)
     if limit is not None:
         content = _truncate_markdown(content, limit)
     sections.append(f"### {title}\n{content}")
+
+
+def _sanitize_public_report_content(content: str) -> str:
+    """Remove private review provenance from report text used in PR bodies."""
+    lines: list[str] = []
+    for line in content.splitlines():
+        sanitized = line
+        sanitized = re.sub(
+            r"\s+modeled on\b[^.\n]*",
+            "",
+            sanitized,
+            flags=re.IGNORECASE,
+        )
+        sanitized = re.sub(
+            r"\s+referenced by\s+@\w+[^.\n]*",
+            "",
+            sanitized,
+            flags=re.IGNORECASE,
+        )
+        sanitized = re.sub(
+            r"\s*\([^)]*(?:@\w+|draft PR|PR\s*#\d+)[^)]*\)",
+            "",
+            sanitized,
+            flags=re.IGNORECASE,
+        )
+        sanitized = re.sub(
+            r"\s+\bon\s+the\s+draft\s+PR\b",
+            "",
+            sanitized,
+            flags=re.IGNORECASE,
+        )
+        sanitized = re.sub(
+            r"\s+\bsee\s+PR\s*#\d+\b",
+            "",
+            sanitized,
+            flags=re.IGNORECASE,
+        )
+        sanitized = re.sub(r"[ \t]{2,}", " ", sanitized).rstrip()
+        lines.append(sanitized)
+    return "\n".join(lines).strip()
 
 
 def _extract_markdown_section(markdown: str, titles: list[str]) -> str:
