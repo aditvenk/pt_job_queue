@@ -11,6 +11,7 @@ from ptq.cli import app
 from ptq.domain.models import JobRecord, RebaseInfo, RebaseState
 from ptq.evaluator.models import ReviewResult
 from ptq.infrastructure.job_repository import JobRepository
+from ptq.orchestrator.models import Issue, SolveResult
 
 runner = CliRunner()
 
@@ -735,6 +736,60 @@ def test_orchestrate_uses_config_max_issues_for_prompt_selection():
 
     assert result.exit_code == 0, result.output
     assert captured["config"].max_issues == 7
+
+
+def test_orchestrate_final_output_points_to_report_and_pr(tmp_path):
+    repo = _make_repo(
+        tmp_path,
+        [
+            JobRecord(
+                job_id="job-123",
+                issue=123,
+                local=True,
+                workspace="~/ptq_test_ws",
+            )
+        ],
+    )
+
+    class FakeEvaluator:
+        def __init__(self, **kwargs):
+            pass
+
+    class FakeOrchestrator:
+        def __init__(self, config, **kwargs):
+            pass
+
+        async def run(self):
+            return [
+                SolveResult(
+                    issue=Issue(number=123, title="bug"),
+                    verdict="approved",
+                    score=0.91,
+                    iterations=1,
+                    job_id="job-123",
+                    branch="ptq/123",
+                    pr_url="https://github.com/pytorch/pytorch/pull/1",
+                )
+            ]
+
+    with (
+        patch("ptq.cli._repo", return_value=repo),
+        patch("ptq.config.load_config", return_value=_fake_orchestrate_config()),
+        patch("ptq.evaluator.Evaluator", FakeEvaluator),
+        patch("ptq.orchestrator.Orchestrator", FakeOrchestrator),
+    ):
+        result = runner.invoke(app, ["orchestrate", "--issue", "123", "--pr"])
+
+    assert result.exit_code == 0, result.output
+    assert (
+        "#123 approved score=0.91 iterations=1 job=job-123 branch=ptq/123"
+        in result.output
+    )
+    assert (
+        f"report.md: {Path.home()}/ptq_test_ws/jobs/job-123/report.md"
+        in result.output
+    )
+    assert "PR: https://github.com/pytorch/pytorch/pull/1" in result.output
 
 
 def test_orchestrate_has_no_max_issues_flag():

@@ -933,6 +933,20 @@ def _evaluator_models(evaluator_section: dict) -> list[str]:
     return ["gpt-5.5", "claude-opus-4-7"]
 
 
+def _orchestrate_report_path(job_id: str | None) -> str | None:
+    if not job_id:
+        return None
+    try:
+        job = _repo().get(job_id)
+    except PtqError:
+        return None
+
+    path = f"{job.workspace}/jobs/{job_id}/report.md"
+    if job.local:
+        return str(Path(job.workspace).expanduser() / "jobs" / job_id / "report.md")
+    return f"{job.machine or 'remote'}:{path}"
+
+
 def _print_orchestrate_results(results) -> None:
     for result in results:
         issue_number = result.issue.number
@@ -942,12 +956,16 @@ def _print_orchestrate_results(results) -> None:
         job_id = result.job_id or "-"
         branch = result.branch or "-"
         pr_url = getattr(result, "pr_url", None)
-        pr_text = f" pr={pr_url}" if pr_url else ""
         console.print(
             f"#{issue_number} {verdict} "
             f"score={score:.2f} iterations={iterations} "
-            f"job={job_id} branch={branch}{pr_text}"
+            f"job={job_id} branch={branch}"
         )
+        report_path = _orchestrate_report_path(result.job_id)
+        if report_path:
+            console.print(f"  report.md: {report_path}")
+        if pr_url:
+            console.print(f"  PR: {pr_url}")
 
 
 @app.command()
