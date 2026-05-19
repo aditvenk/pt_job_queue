@@ -325,6 +325,173 @@ def test_post_process_pushes_draft_pr_when_enabled(tmp_path):
     assert result.pr_url == "https://github.com/pytorch/pytorch/pull/123"
 
 
+def test_post_process_watches_draft_pr_when_enabled(tmp_path):
+    calls = []
+
+    class FakeOrchestrator(Orchestrator):
+        async def _push_draft_pr(self, result):
+            calls.append("push")
+            return SimpleNamespace(
+                branch=f"ptq/{result.issue.number}",
+                url="https://github.com/pytorch/pytorch/pull/123",
+            )
+
+        async def _watch_pr(self, result):
+            calls.append(("watch", result.pr_url))
+
+    orchestrator = FakeOrchestrator(
+        OrchestratorConfig(
+            issue_selection_prompt="open bugs",
+            log_path=tmp_path / "runs.jsonl",
+            push_pr=True,
+            watch_pr=True,
+        )
+    )
+    result = SolveResult(
+        issue=Issue(number=1, title="bug"),
+        verdict="approved",
+        score=0.9,
+        iterations=1,
+        job_id="job-1",
+        state="completed",
+    )
+    asyncio.run(orchestrator.post_process(result))
+    assert calls == ["push", ("watch", "https://github.com/pytorch/pytorch/pull/123")]
+
+
+def test_watch_pr_stops_when_pr_is_closed(tmp_path):
+    progress = []
+
+    class FakeOrchestrator(Orchestrator):
+        async def _pr_state(self, result):
+            return "closed"
+
+        async def _fetch_pr_feedback(self, issue):
+            raise AssertionError("closed PR should not fetch feedback")
+
+    orchestrator = FakeOrchestrator(
+        OrchestratorConfig(
+            issue_selection_prompt="open bugs",
+            log_path=tmp_path / "runs.jsonl",
+            watch_pr=True,
+            watch_pr_interval_seconds=0,
+        ),
+        on_progress=progress.append,
+    )
+    result = SolveResult(
+        issue=Issue(number=1, title="bug"),
+        verdict="approved",
+        score=0.9,
+        iterations=1,
+        job_id="job-1",
+        pr_url="https://github.com/pytorch/pytorch/pull/123",
+    )
+    asyncio.run(orchestrator._watch_pr(result))
+    assert progress == ["#1: PR is closed; stopping PR watch"]
+
+
+def test_watch_pr_stops_after_idle_timeout(tmp_path):
+    progress = []
+
+    class FakeOrchestrator(Orchestrator):
+        async def _pr_state(self, result):
+            return "open"
+
+        async def _fetch_pr_feedback(self, issue):
+            return None
+
+    orchestrator = FakeOrchestrator(
+        OrchestratorConfig(
+            issue_selection_prompt="open bugs",
+            log_path=tmp_path / "runs.jsonl",
+            watch_pr=True,
+            watch_pr_interval_seconds=0,
+            watch_pr_idle_seconds=0,
+        ),
+        on_progress=progress.append,
+    )
+    result = SolveResult(
+        issue=Issue(number=1, title="bug"),
+        verdict="approved",
+        score=0.9,
+        iterations=1,
+        job_id="job-1",
+        pr_url="https://github.com/pytorch/pytorch/pull/123",
+    )
+    asyncio.run(orchestrator._watch_pr(result))
+    assert any("no PR activity" in message for message in progress)
+
+
+def test_watch_pr_reacts_to_new_feedback_and_updates_pr(tmp_path):
+    progress = []
+    feedback_calls = 0
+    pushed = []
+
+    class FakeOrchestrator(Orchestrator):
+        async def _pr_state(self, result):
+            if pushed:
+                return "closed"
+            return "open"
+
+        async def _fetch_pr_feedback(self, issue):
+            nonlocal feedback_calls
+            feedback_calls += 1
+            if feedback_calls == 1:
+                return None
+            return {
+                "source": "github_pr",
+                "pr_url": "https://github.com/pytorch/pytorch/pull/123",
+                "comments": [
+                    {
+                        "kind": "conversation",
+                        "id": 10,
+                        "author": "reviewer",
+                        "body": "Please add a regression test.",
+                    }
+                ],
+                "ci_failures": [],
+            }
+
+        async def solve_issue(self, issue):
+            return SolveResult(
+                issue=issue,
+                verdict="approved",
+                score=0.9,
+                iterations=1,
+                job_id="job-2",
+            )
+
+        async def _push_draft_pr(self, result):
+            pushed.append(result.job_id)
+            return SimpleNamespace(
+                branch="ptq/1",
+                url="https://github.com/pytorch/pytorch/pull/123",
+            )
+
+    orchestrator = FakeOrchestrator(
+        OrchestratorConfig(
+            issue_selection_prompt="open bugs",
+            log_path=tmp_path / "runs.jsonl",
+            watch_pr=True,
+            watch_pr_interval_seconds=0,
+            watch_pr_idle_seconds=3600,
+        ),
+        on_progress=progress.append,
+    )
+    result = SolveResult(
+        issue=Issue(number=1, title="bug"),
+        verdict="approved",
+        score=0.9,
+        iterations=1,
+        job_id="job-1",
+        pr_url="https://github.com/pytorch/pytorch/pull/123",
+    )
+    asyncio.run(orchestrator._watch_pr(result))
+    assert pushed == ["job-2"]
+    assert result.job_id == "job-2"
+    assert any("draft PR updated" in message for message in progress)
+
+
 def test_push_draft_pr_lets_pr_service_choose_title(tmp_path):
     class FakeRepo:
         pass

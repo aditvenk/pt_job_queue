@@ -83,6 +83,9 @@ uv run ptq orchestrate \
 # Run one explicit issue and update/create a draft PR after approval.
 uv run ptq orchestrate --issue 166156 --machine localhost --pr
 
+# Push a draft PR, then keep watching it for review comments or CI failures.
+uv run ptq orchestrate --issue 166156 --machine localhost --watch-pr
+
 # Select issues from natural-language criteria.
 uv run ptq orchestrate \
   --prompt "open issues labeled 'module: nn' with a repro script" \
@@ -114,6 +117,7 @@ Useful flags:
 | `--poll-seconds N` | Poll interval while waiting on solver jobs. |
 | `--dry-run` | Select issues without launching solver jobs. |
 | `--pr` | Push/create or update a draft PR after approval; default is no PR push. |
+| `--watch-pr` | Implies `--pr`; keep polling the draft PR for review/CI activity until the PR closes or 24h pass with no activity. |
 
 View orchestrator history:
 
@@ -366,6 +370,9 @@ parallel = 4
 max_iterations = 5
 approval_threshold = 0.8
 machine = "localhost"
+watch_pr = false
+watch_pr_interval_seconds = 300
+watch_pr_idle_hours = 24
 
 [evaluator]
 models = ["gpt-5.5", "claude-opus-4-7"]

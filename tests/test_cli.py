@@ -615,6 +615,46 @@ def test_orchestrate_no_follow_and_pr_flag():
     assert captured["config"].push_pr is True
 
 
+def test_orchestrate_watch_pr_implies_pr_and_sets_watch_knobs():
+    captured = {}
+
+    class FakeEvaluator:
+        def __init__(self, **kwargs):
+            pass
+
+    class FakeOrchestrator:
+        def __init__(self, config, **kwargs):
+            captured["config"] = config
+
+        async def run(self):
+            return []
+
+    with (
+        patch("ptq.config.load_config", return_value=_fake_orchestrate_config()),
+        patch("ptq.evaluator.Evaluator", FakeEvaluator),
+        patch("ptq.orchestrator.Orchestrator", FakeOrchestrator),
+    ):
+        result = runner.invoke(
+            app,
+            [
+                "orchestrate",
+                "--issue",
+                "123",
+                "--watch-pr",
+                "--watch-pr-interval-seconds",
+                "10",
+                "--watch-pr-idle-hours",
+                "2",
+            ],
+        )
+
+    assert result.exit_code == 0, result.output
+    assert captured["config"].push_pr is True
+    assert captured["config"].watch_pr is True
+    assert captured["config"].watch_pr_interval_seconds == 10
+    assert captured["config"].watch_pr_idle_seconds == 7200
+
+
 def test_orchestrate_repo_flag_selects_supported_repo_profile():
     captured = {}
 
@@ -844,3 +884,4 @@ def test_orchestrate_has_no_max_issues_flag():
     assert result.exit_code == 0, result.output
     assert "--max-issues" not in result.output
     assert "--repo" in result.output
+    assert "--watch-pr" in result.output

@@ -87,6 +87,9 @@ parallel = 4
 max_iterations = 5
 approval_threshold = 0.8
 machine = "localhost"
+watch_pr = false
+watch_pr_interval_seconds = 300
+watch_pr_idle_hours = 24
 
 [evaluator]
 models = ["gpt-5.5", "claude-opus-4-7"]

@@ -34,6 +34,9 @@ class OrchestratorConfig:
     solver_max_turns: int = 100
     initial_message: str | None = None
     push_pr: bool = False
+    watch_pr: bool = False
+    watch_pr_interval_seconds: float = 300.0
+    watch_pr_idle_seconds: float = 86400.0
     log_path: Path = Path.home() / ".ptq" / "orchestrator" / "runs.jsonl"
 
     @property

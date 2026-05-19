@@ -1138,6 +1138,30 @@ def orchestrate(
             help="After approval, push/create or update a draft GitHub PR.",
         ),
     ] = False,
+    watch_pr: Annotated[
+        bool,
+        typer.Option(
+            "--watch-pr",
+            help=(
+                "After pushing a draft PR, keep watching for review/CI activity; "
+                "implies --pr."
+            ),
+        ),
+    ] = False,
+    watch_pr_interval_seconds: Annotated[
+        float | None,
+        typer.Option(
+            "--watch-pr-interval-seconds",
+            help="Seconds between PR activity polls when --watch-pr is set.",
+        ),
+    ] = None,
+    watch_pr_idle_hours: Annotated[
+        float | None,
+        typer.Option(
+            "--watch-pr-idle-hours",
+            help="Stop --watch-pr after this many hours without PR activity.",
+        ),
+    ] = None,
 ) -> None:
     """Run the issue-selection, solver, evaluator hill-climbing loop."""
     from ptq.config import load_config
@@ -1181,6 +1205,17 @@ def orchestrate(
     max_issues_value = 1 if issue is not None else int(orch.get("max_issues", 20))
     parallel_value = int(parallel or orch.get("parallel", 4))
     stream_solver = bool(follow)
+    watch_pr_enabled = bool(watch_pr or orch.get("watch_pr", False))
+    watch_interval = float(
+        watch_pr_interval_seconds
+        if watch_pr_interval_seconds is not None
+        else orch.get("watch_pr_interval_seconds", 300.0)
+    )
+    watch_idle_hours = float(
+        watch_pr_idle_hours
+        if watch_pr_idle_hours is not None
+        else orch.get("watch_pr_idle_hours", 24.0)
+    )
 
     config = OrchestratorConfig(
         issue_selection_prompt=issue_prompt,
@@ -1197,7 +1232,10 @@ def orchestrate(
         solver_thinking=thinking,
         solver_max_turns=cfg.default_max_turns,
         initial_message=message,
-        push_pr=push_pr,
+        push_pr=push_pr or watch_pr_enabled,
+        watch_pr=watch_pr_enabled,
+        watch_pr_interval_seconds=watch_interval,
+        watch_pr_idle_seconds=watch_idle_hours * 3600.0,
     )
 
     evaluator = Evaluator(

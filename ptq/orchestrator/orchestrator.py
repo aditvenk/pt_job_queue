@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import shlex
+import time
 from pathlib import Path
 from typing import Callable
 
@@ -189,6 +190,8 @@ class Orchestrator:
                     self._progress(
                         f"#{result.issue.number}: draft PR ready: {pr_result.url}"
                     )
+                    if self.config.watch_pr:
+                        await self._watch_pr(result)
                 except Exception as exc:
                     result.error = f"Approved, but failed to push draft PR: {exc}"
                     self._progress(f"#{result.issue.number}: {result.error}")
@@ -217,6 +220,139 @@ class Orchestrator:
             log=lambda msg: self._progress(
                 f"#{result.issue.number}: pr: {msg}"
             ),
+        )
+
+    async def _watch_pr(self, result: SolveResult) -> None:
+        if not result.job_id or not result.pr_url:
+            return
+
+        idle_seconds = max(0.0, float(self.config.watch_pr_idle_seconds))
+        interval = max(0.0, float(self.config.watch_pr_interval_seconds))
+        initial_state = await self._pr_state(result)
+        if initial_state in {"closed", "merged"}:
+            self._progress(
+                f"#{result.issue.number}: PR is {initial_state}; stopping PR watch"
+            )
+            self.reporter.log(
+                "pr_watch_stop",
+                issue=result.issue.number,
+                pr_url=result.pr_url,
+                reason=initial_state,
+            )
+            return
+        last_activity = time.monotonic()
+        baseline_feedback = await self._fetch_pr_feedback(result.issue)
+        last_fingerprint = _pr_feedback_fingerprint(baseline_feedback)
+        self._progress(
+            f"#{result.issue.number}: watching PR for review activity "
+            f"(idle timeout {idle_seconds / 3600:.1f}h)"
+        )
+        self.reporter.log(
+            "pr_watch_start",
+            issue=result.issue.number,
+            job_id=result.job_id,
+            pr_url=result.pr_url,
+            baseline_feedback=baseline_feedback,
+            idle_seconds=idle_seconds,
+            interval_seconds=interval,
+        )
+
+        while True:
+            state = await self._pr_state(result)
+            if state in {"closed", "merged"}:
+                self._progress(
+                    f"#{result.issue.number}: PR is {state}; stopping PR watch"
+                )
+                self.reporter.log(
+                    "pr_watch_stop",
+                    issue=result.issue.number,
+                    pr_url=result.pr_url,
+                    reason=state,
+                )
+                return
+
+            idle_for = time.monotonic() - last_activity
+            if idle_for >= idle_seconds:
+                self._progress(
+                    f"#{result.issue.number}: no PR activity for "
+                    f"{idle_for / 3600:.1f}h; stopping PR watch"
+                )
+                self.reporter.log(
+                    "pr_watch_stop",
+                    issue=result.issue.number,
+                    pr_url=result.pr_url,
+                    reason="idle",
+                    idle_seconds=idle_for,
+                )
+                return
+
+            if interval:
+                await asyncio.sleep(interval)
+            else:
+                await asyncio.sleep(0)
+
+            feedback = await self._fetch_pr_feedback(result.issue)
+            fingerprint = _pr_feedback_fingerprint(feedback)
+            if fingerprint == last_fingerprint:
+                continue
+
+            last_activity = time.monotonic()
+            last_fingerprint = fingerprint
+            if not feedback:
+                self._progress(
+                    f"#{result.issue.number}: PR feedback/CI cleared; continuing watch"
+                )
+                self.reporter.log(
+                    "pr_watch_activity",
+                    issue=result.issue.number,
+                    pr_url=result.pr_url,
+                    activity="feedback_cleared",
+                )
+                continue
+
+            self._progress(_format_pr_feedback_snapshot(result.issue, feedback))
+            self.reporter.log(
+                "pr_watch_activity",
+                issue=result.issue.number,
+                pr_url=result.pr_url,
+                activity="new_feedback",
+                feedback=feedback,
+            )
+            followup = await self.solve_issue(result.issue)
+            if followup.verdict == "approved" and followup.job_id:
+                try:
+                    pr_result = await self._push_draft_pr(followup)
+                    followup.branch = pr_result.branch
+                    followup.pr_url = pr_result.url
+                    result.job_id = followup.job_id
+                    result.branch = followup.branch
+                    result.pr_url = followup.pr_url
+                    self._progress(
+                        f"#{result.issue.number}: draft PR updated: {pr_result.url}"
+                    )
+                except Exception as exc:
+                    followup.error = (
+                        f"Approved, but failed to update draft PR: {exc}"
+                    )
+                    self._progress(f"#{result.issue.number}: {followup.error}")
+            self.reporter.log_result(followup)
+
+    async def _pr_state(self, result: SolveResult) -> str:
+        if not result.job_id:
+            return "unknown"
+        job = await asyncio.to_thread(self.job_repo.get, result.job_id)
+        pr_url = result.pr_url or job.pr_url
+        if not pr_url:
+            return "unknown"
+        backend = backend_for_job(job)
+        from ptq.application.pr_service import get_pr_state
+
+        return await asyncio.to_thread(
+            get_pr_state,
+            backend,
+            pr_url,
+            force_refresh=True,
+            ttl_seconds=0.0,
         )
 
     async def _prepare_review_branch(self, result: SolveResult) -> str:
@@ -472,6 +608,42 @@ def _loads_json(text: str) -> dict:
     except json.JSONDecodeError:
         return {}
     return data if isinstance(data, dict) else {}
+
+
+def _pr_feedback_fingerprint(feedback: dict | None) -> str:
+    if not feedback:
+        return ""
+    comments = []
+    for item in feedback.get("comments", []):
+        if not isinstance(item, dict):
+            continue
+        comments.append(
+            {
+                "kind": item.get("kind"),
+                "id": item.get("id"),
+                "author": item.get("author"),
+                "body": item.get("body"),
+                "url": item.get("url"),
+                "created_at": item.get("created_at") or item.get("submitted_at"),
+            }
+        )
+    ci_failures = []
+    for item in feedback.get("ci_failures", []):
+        if not isinstance(item, dict):
+            continue
+        ci_failures.append(
+            {
+                "name": item.get("name"),
+                "state": item.get("state"),
+                "workflow": item.get("workflow"),
+                "description": item.get("description"),
+                "link": item.get("link"),
+                "started_at": item.get("started_at"),
+                "completed_at": item.get("completed_at"),
+            }
+        )
+    payload = {"comments": comments, "ci_failures": ci_failures}
+    return json.dumps(payload, sort_keys=True, separators=(",", ":"))
 
 
 def _format_review_snapshot(review: ReviewResult) -> str:
