@@ -1,9 +1,16 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from unittest.mock import patch
 
-from ptq.issue import extract_repro_script, fetch_issue, format_issue_context, search_issues
+from ptq.domain.models import PtqError
+from ptq.issue import (
+    extract_repro_script,
+    fetch_issue,
+    format_issue_context,
+    search_issues,
+)
 
 
 class TestExtractReproScript:
@@ -108,6 +115,23 @@ class TestFetchIssue:
             issue_number=12345,
         )
 
+    def test_stale_harness_socket_falls_back_to_gh(self):
+        fake_data = {"title": "Bug", "body": "desc", "comments": [], "labels": []}
+        mock_result = type("R", (), {"stdout": json.dumps(fake_data), "returncode": 0})()
+        with (
+            patch("ptq.issue.harness_available", return_value=True),
+            patch(
+                "ptq.issue.call_github_harness",
+                side_effect=PtqError(
+                    "GitHub harness unavailable at /tmp/socket: refused"
+                ),
+            ),
+            patch("ptq.issue.subprocess.run", return_value=mock_result) as mock_run,
+        ):
+            result = fetch_issue(12345)
+        assert result == fake_data
+        assert Path(mock_run.call_args[0][0][0]).name == "gh"
+
 
 class TestSearchIssues:
     def test_uses_external_harness_when_available(self):
@@ -124,3 +148,20 @@ class TestSearchIssues:
             query="is:issue is:open",
             limit=5,
         )
+
+    def test_stale_harness_socket_falls_back_to_gh(self):
+        fake_rows = [{"number": 12345, "title": "Bug"}]
+        mock_result = type("R", (), {"stdout": json.dumps(fake_rows), "returncode": 0})()
+        with (
+            patch("ptq.issue.harness_available", return_value=True),
+            patch(
+                "ptq.issue.call_github_harness",
+                side_effect=PtqError(
+                    "GitHub harness unavailable at /tmp/socket: refused"
+                ),
+            ),
+            patch("ptq.issue.subprocess.run", return_value=mock_result) as mock_run,
+        ):
+            result = search_issues("is:issue is:open", repo="pytorch/pytorch", limit=5)
+        assert result == fake_rows
+        assert Path(mock_run.call_args[0][0][0]).name == "gh"

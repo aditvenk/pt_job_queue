@@ -27,12 +27,16 @@ def github_cli_env() -> dict[str, str]:
 
 def fetch_issue(issue_number: int, repo: str = "pytorch/pytorch") -> dict:
     if harness_available():
-        data = call_github_harness(
-            "fetch_issue",
-            repo=repo,
-            issue_number=issue_number,
-        )
-        return data if isinstance(data, dict) else {}
+        try:
+            data = call_github_harness(
+                "fetch_issue",
+                repo=repo,
+                issue_number=issue_number,
+            )
+            return data if isinstance(data, dict) else {}
+        except PtqError as exc:
+            if "GitHub harness unavailable" not in str(exc):
+                raise
 
     try:
         result = subprocess.run(
@@ -67,13 +71,17 @@ def search_issues(
     query: str, *, repo: str = "pytorch/pytorch", limit: int = 20
 ) -> list[dict]:
     if harness_available():
-        data = call_github_harness(
-            "search_issues",
-            repo=repo,
-            query=query,
-            limit=limit,
-        )
-        return data if isinstance(data, list) else []
+        try:
+            data = call_github_harness(
+                "search_issues",
+                repo=repo,
+                query=query,
+                limit=limit,
+            )
+            return data if isinstance(data, list) else []
+        except PtqError as exc:
+            if "GitHub harness unavailable" not in str(exc):
+                raise
 
     try:
         result = subprocess.run(

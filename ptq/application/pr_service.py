@@ -76,9 +76,12 @@ def _run_github(
             data = call_github_harness("gh", args=args, cwd=harness_cwd)
         except PtqError as exc:
             # Older harness servers only support issue fetch/search. Let direct
-            # backend execution handle tests and non-Codex shells until the
-            # harness is restarted with the gh action.
-            if "Unknown action: gh" not in str(exc):
+            # backend execution handle tests, stale sockets, and non-Codex shells
+            # until the harness is restarted with the gh action.
+            if (
+                "Unknown action: gh" not in str(exc)
+                and "GitHub harness unavailable" not in str(exc)
+            ):
                 raise
         else:
             if not isinstance(data, dict):
