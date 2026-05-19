@@ -173,10 +173,7 @@ def _clean_pr_title(text: str) -> str:
     title = " ".join(text.split()).strip()
     title = re.sub(r"\s*\bFixes?\s+#\d+\b\.?\s*$", "", title, flags=re.IGNORECASE)
     title = re.sub(r"\s*\(#\d+\)\s*$", "", title)
-    title = title.strip(" .")
-    if len(title) > 90:
-        title = title[:87].rstrip(" .") + "..."
-    return title
+    return title.strip(" .")
 
 
 def _first_sentence(text: str) -> str:
@@ -187,18 +184,46 @@ def _first_sentence(text: str) -> str:
     return sentences[0].strip() if sentences else compact
 
 
+def _fix_title_from_summary(summary: str) -> str:
+    compact = " ".join(summary.split())
+    if not compact:
+        return ""
+    if "DTensor.to_local" in compact and (
+        "_is_param" in compact or "Parameter" in compact
+    ):
+        return "Preserve Parameter markers in DTensor.to_local"
+
+    sentences = re.split(r"(?<=[.!?])\s+", compact)
+    for sentence in sentences:
+        stripped = sentence.strip()
+        if re.match(r"^(the\s+)?fix\b", stripped, flags=re.IGNORECASE):
+            return re.sub(
+                r"^(the\s+)?fix(es)?\s+",
+                "",
+                stripped,
+                flags=re.IGNORECASE,
+            ).strip()
+    return ""
+
+
 def _build_pr_title(
     requested_title: str | None,
     *,
     status: dict,
     report: str,
 ) -> str:
+    status_summary = str(status.get("summary") or "")
+    fix_section = _extract_markdown_section(report, ["Fix"])
+    report_summary = _extract_markdown_section(report, ["Summary"])
     candidates = [
         requested_title,
         str(status.get("pr_title") or ""),
-        _first_sentence(str(status.get("summary") or "")),
-        _first_sentence(_extract_markdown_section(report, ["Summary"])),
-        _first_sentence(_extract_markdown_section(report, ["Fix"])),
+        _fix_title_from_summary(status_summary),
+        _fix_title_from_summary(fix_section),
+        _fix_title_from_summary(report_summary),
+        _first_sentence(fix_section),
+        _first_sentence(report_summary),
+        _first_sentence(status_summary),
     ]
     for candidate in candidates:
         if not candidate:
@@ -420,30 +445,40 @@ def _build_agent_report_section(
     summary = _extract_markdown_section(report, ["Summary"])
     if not summary:
         summary = _concise_status_summary(str(status.get("summary") or ""))
-    _append_report_subsection(sections, "Summary", summary, limit=900)
+    _append_report_subsection(sections, "Summary", summary)
     _append_report_subsection(
         sections,
         "Root Cause",
         _extract_markdown_section(report, ["Root cause", "Root Cause"]),
-        limit=1600,
     )
     _append_report_subsection(
         sections,
         "Fix",
         _extract_markdown_section(report, ["Fix"]),
-        limit=2200,
     )
     repro_section = _build_repro_report_section(
         _strip_details_blocks(_extract_markdown_section(report, ["Repro"])),
         repro,
         repro_filename,
     )
-    _append_report_subsection(sections, "Repro", repro_section, limit=5000)
+    _append_report_subsection(sections, "Repro", repro_section, limit=30000)
     _append_report_subsection(
         sections,
         "Testing",
         _extract_markdown_section(report, ["Test results", "Testing", "Tests"]),
-        limit=2600,
+    )
+    _append_report_subsection(
+        sections,
+        "Backward Compatibility",
+        _extract_markdown_section(
+            report,
+            [
+                "Backward compatibility analysis",
+                "Backward compatibility",
+                "BC analysis",
+                "BC",
+            ],
+        ),
     )
     return "\n\n".join(sections).strip()
 
@@ -453,12 +488,14 @@ def _append_report_subsection(
     title: str,
     content: str,
     *,
-    limit: int,
+    limit: int | None = None,
 ) -> None:
     content = content.strip()
     if not content:
         return
-    sections.append(f"### {title}\n{_truncate_markdown(content, limit)}")
+    if limit is not None:
+        content = _truncate_markdown(content, limit)
+    sections.append(f"### {title}\n{content}")
 
 
 def _extract_markdown_section(markdown: str, titles: list[str]) -> str:

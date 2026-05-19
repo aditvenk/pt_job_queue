@@ -234,6 +234,7 @@ PR description format:
 - fix
 - repro command and repro script
 - testing
+- backward compatibility analysis, when the solver report includes it
 - files changed
 - `Fixes #<issue>`
 

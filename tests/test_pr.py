@@ -75,6 +75,9 @@ Reporter repro details.
 
 ## Test results
 A new regression test was added.
+
+## Backward compatibility analysis
+Raw DTensor to_local identity behavior is unchanged.
 """
         body = _build_pr_body(
             report,
@@ -92,6 +95,10 @@ A new regression test was added.
         assert "python repro_42_generated.py" in body
         assert "print('repro')" in body
         assert "### Testing\nA new regression test was added." in body
+        assert (
+            "### Backward Compatibility\n"
+            "Raw DTensor to_local identity behavior is unchanged."
+        ) in body
 
     def test_does_not_dump_worklog(self):
         body = _build_pr_body(
@@ -169,6 +176,21 @@ A new regression test was added.
         assert "gpt-5.5" not in body
         assert "claude-opus" not in body
 
+    def test_agent_report_does_not_truncate_useful_sections(self):
+        long_fix = "Preserve DTensor parameter metadata. " + ("details " * 400)
+        report = f"""## Summary
+Summary.
+
+## Fix
+{long_fix}
+
+## Test results
+Tests passed.
+"""
+        body = _build_pr_body(report, "", "", issue_number=42, human_note="Note")
+        assert long_fix.strip() in body
+        assert "details..." not in body
+
 
 class TestBuildCommitMessage:
     def test_includes_summary_and_fixes_footer(self):
@@ -212,6 +234,31 @@ class TestBuildPrTitle:
             report="",
         )
         assert title == "Preserve Parameter markers in DTensor.to_local"
+
+    def test_does_not_truncate_status_pr_title(self):
+        long_title = (
+            "Preserve Parameter markers in DTensor.to_local without mutating the "
+            "underlying local tensor returned by existing raw DTensor calls"
+        )
+        title = _build_pr_title(None, status={"pr_title": long_title}, report="")
+        assert title == long_title
+        assert not title.endswith("...")
+
+    def test_derives_fix_oriented_dtensor_title_from_bug_summary(self):
+        title = _build_pr_title(
+            None,
+            status={
+                "summary": (
+                    "DTensor.to_local() drops the _is_param marker that nn.Parameter "
+                    "sets on custom-tensor instances, so nn.Parameter(dtensor)."
+                    "to_local() returned a plain tensor (gh-166156). Fix stamps "
+                    "_is_param on the returned tensor."
+                )
+            },
+            report="",
+        )
+        assert title == "Preserve Parameter markers in DTensor.to_local"
+        assert "drops" not in title
 
 
 class TestEnsureSshRemote:
