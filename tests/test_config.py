@@ -2,7 +2,14 @@ from __future__ import annotations
 
 import textwrap
 
-from ptq.config import AgentModels, Config, _parse, _parse_pi_models, load_config
+from ptq.config import (
+    AgentModels,
+    Config,
+    _parse,
+    _parse_pi_models,
+    ensure_additional_evaluator,
+    load_config,
+)
 
 
 class TestParse:
@@ -198,3 +205,42 @@ class TestLoadConfig:
         assert cfg.agent_models["codex"].default == "o3"
         assert cfg.agent_models["pi"].default == "openai-codex/gpt-5.5"
         assert cfg.agent_models["pi"].thinking == "high"
+
+    def test_ensure_additional_evaluator_inserts_and_updates(self, tmp_path):
+        path = tmp_path / "config.toml"
+        path.write_text(
+            textwrap.dedent("""\
+            [defaults]
+            agent = "claude"
+
+            [evaluator]
+            models = ["gpt-5.5", "claude-opus-4-7"]
+            approval_threshold = 0.8
+            """)
+        )
+
+        assert ensure_additional_evaluator(
+            name="aditvenk-style",
+            profile="aditvenk",
+            model="gpt-5.5",
+            path=path,
+        )
+        cfg = load_config(path)
+        assert cfg.evaluator["additional_reviewers"] == [
+            {"name": "aditvenk-style", "profile": "aditvenk", "model": "gpt-5.5"}
+        ]
+
+        assert not ensure_additional_evaluator(
+            name="aditvenk-style",
+            profile="aditvenk",
+            model="gpt-5.5",
+            path=path,
+        )
+        assert ensure_additional_evaluator(
+            name="aditvenk-style",
+            profile="aditvenk",
+            model="gpt-5.4",
+            path=path,
+        )
+        cfg = load_config(path)
+        assert cfg.evaluator["additional_reviewers"][0]["model"] == "gpt-5.4"

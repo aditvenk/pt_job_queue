@@ -436,6 +436,128 @@ def load_config(path: Path | None = None) -> Config:
     return _parse(tomllib.loads(path.read_text()))
 
 
+def ensure_additional_evaluator(
+    *,
+    name: str,
+    profile: str,
+    model: str,
+    path: Path | None = None,
+) -> bool:
+    """Persist a profile-backed evaluator in ~/.ptq/config.toml.
+
+    Returns True when the config file was changed.
+    """
+    path = path or CONFIG_PATH
+    if not path.exists():
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(_DEFAULT_TOML)
+    text = path.read_text()
+    data = tomllib.loads(text)
+    evaluator = data.get("evaluator", {})
+    existing = evaluator.get("additional_reviewers", [])
+    reviewers = [item for item in existing if isinstance(item, dict)]
+    spec = {"name": name, "profile": profile, "model": model}
+
+    changed = False
+    for index, item in enumerate(reviewers):
+        if str(item.get("name") or "") == name:
+            normalized = {
+                "name": str(item.get("name") or ""),
+                "profile": str(item.get("profile") or ""),
+                "model": str(item.get("model") or ""),
+            }
+            if normalized == spec:
+                return False
+            reviewers[index] = spec
+            changed = True
+            break
+    else:
+        reviewers.append(spec)
+        changed = True
+
+    if not changed:
+        return False
+    path.write_text(_replace_evaluator_reviewers(text, reviewers))
+    return True
+
+
+def _replace_evaluator_reviewers(text: str, reviewers: list[dict]) -> str:
+    lines = text.splitlines()
+    start, end = _toml_section_bounds(lines, "evaluator")
+    block = _reviewers_toml_block(reviewers)
+    if start is None:
+        suffix = "" if text.endswith("\n") or not text else "\n"
+        return text + suffix + "\n[evaluator]\n" + block + "\n"
+
+    key_start, key_end = _toml_key_bounds(lines, start + 1, end, "additional_reviewers")
+    if key_start is not None:
+        new_lines = lines[:key_start] + block.splitlines() + lines[key_end:]
+    else:
+        insert_at = start + 1
+        while insert_at < end and (
+            not lines[insert_at].strip()
+            or lines[insert_at].lstrip().startswith("#")
+        ):
+            insert_at += 1
+        new_lines = lines[:insert_at] + block.splitlines() + lines[insert_at:]
+    return "\n".join(new_lines) + ("\n" if text.endswith("\n") else "")
+
+
+def _toml_section_bounds(
+    lines: list[str],
+    section: str,
+) -> tuple[int | None, int]:
+    header = f"[{section}]"
+    for index, line in enumerate(lines):
+        if line.strip() != header:
+            continue
+        end = len(lines)
+        for next_index in range(index + 1, len(lines)):
+            stripped = lines[next_index].strip()
+            if stripped.startswith("[") and stripped.endswith("]"):
+                end = next_index
+                break
+        return index, end
+    return None, len(lines)
+
+
+def _toml_key_bounds(
+    lines: list[str],
+    start: int,
+    end: int,
+    key: str,
+) -> tuple[int | None, int]:
+    key_re = re.compile(rf"^\s*{re.escape(key)}\s*=")
+    for index in range(start, end):
+        if not key_re.match(lines[index]):
+            continue
+        depth = lines[index].count("[") - lines[index].count("]")
+        cursor = index + 1
+        while depth > 0 and cursor < end:
+            depth += lines[cursor].count("[") - lines[cursor].count("]")
+            cursor += 1
+        return index, cursor
+    return None, end
+
+
+def _reviewers_toml_block(reviewers: list[dict]) -> str:
+    rows = ["additional_reviewers = ["]
+    for item in reviewers:
+        rows.append(
+            "  { "
+            f"name = {_toml_string(str(item.get('name') or ''))}, "
+            f"profile = {_toml_string(str(item.get('profile') or ''))}, "
+            f"model = {_toml_string(str(item.get('model') or ''))} "
+            "},"
+        )
+    rows.append("]")
+    return "\n".join(rows)
+
+
+def _toml_string(value: str) -> str:
+    return json.dumps(value)
+
+
 _DISCOVER_CMDS: dict[str, list[str]] = {
     "codex": ["codex", "exec", "x", "--model", "__invalid__"],
     "cursor": ["agent", "-p", "x", "--model", "__invalid__", "--force"],

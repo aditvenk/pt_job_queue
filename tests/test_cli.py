@@ -9,7 +9,6 @@ from typer.testing import CliRunner
 
 from ptq.cli import app
 from ptq.domain.models import JobRecord, RebaseInfo, RebaseState
-from ptq.evaluator.models import ReviewResult
 from ptq.infrastructure.job_repository import JobRepository
 from ptq.orchestrator.models import Issue, SolveResult
 
@@ -457,79 +456,6 @@ def test_evaluator_models_default_to_required_review_pair():
     ]
 
 
-def test_evaluate_command_builds_solver_output_and_writes_review(tmp_path):
-    repo = _make_repo(
-        tmp_path,
-        [
-            JobRecord(
-                job_id="job-76449",
-                issue=76449,
-                local=True,
-                workspace="/tmp/ws",
-                repo="pytorch",
-            )
-        ],
-    )
-    writes: list[str] = []
-
-    class FakeBackend:
-        workspace = "/tmp/ws"
-
-        def run(self, cmd, check=True, stream=False):
-            if cmd == "cat /tmp/ws/jobs/job-76449/status.json":
-                stdout = (
-                    '{"repro_file": "repro_76449_generated.py", '
-                    '"repro_source": "generated"}'
-                )
-                return type("Result", (), {"returncode": 0, "stdout": stdout})()
-            if cmd == "cat /tmp/ws/jobs/job-76449/report.md":
-                return type("Result", (), {"returncode": 0, "stdout": "report"})()
-            if cmd == "cat /tmp/ws/jobs/job-76449/fix.diff":
-                return type("Result", (), {"returncode": 0, "stdout": "diff"})()
-            if cmd == "cat /tmp/ws/jobs/job-76449/repro_76449_generated.py":
-                return type("Result", (), {"returncode": 0, "stdout": "import torch"})()
-            if cmd.startswith("cat > /tmp/ws/jobs/job-76449/review.json"):
-                writes.append(cmd)
-                return type("Result", (), {"returncode": 0, "stdout": ""})()
-            if cmd.startswith("test -f "):
-                return type("Result", (), {"returncode": 0, "stdout": ""})()
-            return type("Result", (), {"returncode": 1, "stdout": ""})()
-
-    def fake_evaluate(self, solver_output):
-        assert solver_output.issue_number == 76449
-        assert "Issue #76449" in solver_output.issue_body
-        assert solver_output.report_md == "report"
-        assert solver_output.fix_diff == "diff"
-        assert solver_output.repro_script == "import torch"
-        return ReviewResult(
-            verdict="approved",
-            score=0.9,
-            iteration=1,
-            repro_fidelity="faithful",
-            summary="approved",
-        )
-
-    with (
-        patch("ptq.cli._repo", return_value=repo),
-        patch("ptq.infrastructure.backends.backend_for_job", return_value=FakeBackend()),
-        patch(
-            "ptq.issue.fetch_issue",
-            return_value={
-                "title": "Enhance verify",
-                "body": "body",
-                "labels": [],
-                "comments": [],
-            },
-        ),
-        patch("ptq.evaluator.Evaluator.evaluate", fake_evaluate),
-    ):
-        result = runner.invoke(app, ["evaluate", "job-76449", "--issue", "76449"])
-
-    assert result.exit_code == 0, result.output
-    assert '"verdict": "approved"' in result.output
-    assert writes
-
-
 def _fake_orchestrate_config():
     return type(
         "Cfg",
@@ -655,8 +581,9 @@ def test_orchestrate_watch_pr_implies_pr_and_sets_watch_knobs():
     assert captured["config"].watch_pr_idle_seconds == 7200
 
 
-def test_orchestrate_adds_profile_backed_evaluator():
+def test_orchestrate_adds_profile_backed_evaluator(tmp_path):
     captured = {}
+    profile_path = tmp_path / "aditvenk.md"
 
     class FakeEvaluator:
         def __init__(self, **kwargs):
@@ -673,6 +600,14 @@ def test_orchestrate_adds_profile_backed_evaluator():
         patch("ptq.config.load_config", return_value=_fake_orchestrate_config()),
         patch("ptq.evaluator.Evaluator", FakeEvaluator),
         patch("ptq.orchestrator.Orchestrator", FakeOrchestrator),
+        patch(
+            "ptq.evaluator.reviewer_profile.generate_reviewer_profile"
+        ) as generate,
+        patch(
+            "ptq.evaluator.reviewer_profile.reviewer_profile_path",
+            return_value=profile_path,
+        ),
+        patch("ptq.config.ensure_additional_evaluator", return_value=True) as persist,
     ):
         result = runner.invoke(
             app,
@@ -690,11 +625,18 @@ def test_orchestrate_adds_profile_backed_evaluator():
         )
 
     assert result.exit_code == 0, result.output
+    generate.assert_called_once_with("aditvenk", repo="pytorch/pytorch")
+    persist.assert_called_once_with(
+        name="aditvenk-style",
+        profile="aditvenk",
+        model="gpt-5.5",
+    )
     specs = captured["evaluator_kwargs"]["additional_reviewers"]
     assert len(specs) == 1
     assert specs[0].name == "aditvenk-style"
     assert specs[0].model == "gpt-5.5"
-    assert specs[0].profile_path.endswith("evaluator_profiles/aditvenk.md")
+    assert specs[0].profile_path == str(profile_path)
+    assert "saved evaluator aditvenk-style" in result.output
 
 
 def test_orchestrate_repo_flag_selects_supported_repo_profile():
@@ -928,47 +870,14 @@ def test_orchestrate_has_no_max_issues_flag():
     assert "--repo" in result.output
     assert "--watch-pr" in result.output
     assert "--add-evaluator" in result.output
+    assert "generate-review-profile" not in result.output
 
 
-def test_generate_review_profile_command(tmp_path):
-    profile_path = tmp_path / "profile.md"
-    profile = type(
-        "Profile",
-        (),
-        {
-            "username": "aditvenk",
-            "path": profile_path,
-            "pr_count": 2,
-            "comment_count": 4,
-        },
-    )()
+def test_generate_review_profile_is_not_a_top_level_command():
+    result = runner.invoke(app, ["generate-review-profile", "aditvenk"])
+    assert result.exit_code != 0
 
-    with patch(
-        "ptq.evaluator.reviewer_profile.generate_reviewer_profile",
-        return_value=profile,
-    ) as generate:
-        result = runner.invoke(
-            app,
-            [
-                "generate-review-profile",
-                "aditvenk",
-                "--repo",
-                "pytorch/pytorch",
-                "--months",
-                "6",
-                "--limit",
-                "50",
-                "--output",
-                str(profile_path),
-            ],
-        )
 
-    assert result.exit_code == 0, result.output
-    generate.assert_called_once_with(
-        "aditvenk",
-        repo="pytorch/pytorch",
-        months=6,
-        limit=50,
-        output=profile_path,
-    )
-    assert f"Wrote reviewer profile for @aditvenk: {profile_path}" in result.output
+def test_evaluate_is_not_a_top_level_command():
+    result = runner.invoke(app, ["evaluate", "job-123"])
+    assert result.exit_code != 0

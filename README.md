@@ -147,17 +147,9 @@ By default every diff is reviewed by two reviewer models:
 - `gpt-5.5`
 - `claude-opus-4-7`
 
-The diff is not considered ready for human review unless both reviewers score it
-above the configured approval threshold.
-
-You can add a profile-backed reviewer as a third required evaluator. First
-generate the profile from GitHub review history:
-
-```bash
-uv run ptq generate-review-profile aditvenk --repo pytorch/pytorch --months 6
-```
-
-Then include it in orchestration:
+The diff is not considered ready for human review unless all reviewers score it
+above the configured approval threshold. You can add a profile-backed reviewer as
+another required evaluator:
 
 ```bash
 uv run ptq orchestrate \
@@ -167,18 +159,10 @@ uv run ptq orchestrate \
   --agent gpt-5.5
 ```
 
-`--profile aditvenk` resolves to
-`~/.ptq/evaluator_profiles/aditvenk.md`. The added evaluator uses the same
-approval threshold as the built-in reviewers, so the diff is ready only when all
-configured reviewers approve.
-
-Run evaluator standalone on an existing job:
-
-```bash
-uv run ptq evaluate 20260518-pytorch-76449 --issue 76449
-```
-
-The evaluator writes `review.json` into the job directory.
+If `~/.ptq/evaluator_profiles/aditvenk.md` does not exist, orchestrate scans
+recent GitHub PRs reviewed by `aditvenk` and creates it first. The added
+evaluator is also saved to `~/.ptq/config.toml`, so later orchestrate runs reuse
+it without passing `--add-evaluator` again.
 
 ## Repro Gate
 

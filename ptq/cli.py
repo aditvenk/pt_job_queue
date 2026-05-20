@@ -910,20 +910,6 @@ def pr(
     console.print(f"\n[bold green]PR created:[/bold green] {result.url}")
 
 
-def _latest_job_for_issue(issue: int, repo) -> str | None:
-    matches = [
-        job_id
-        for job_id, job in repo.list_all().items()
-        if job.issue == issue and job.repo == "pytorch"
-    ]
-    return sorted(matches)[-1] if matches else None
-
-
-def _backend_text(backend, path: str) -> str:
-    result = backend.run(f"cat {path}", check=False)
-    return result.stdout if result.returncode == 0 else ""
-
-
 def _evaluator_models(evaluator_section: dict) -> list[str]:
     raw_models = evaluator_section.get("models")
     if isinstance(raw_models, list):
@@ -939,9 +925,15 @@ def _additional_evaluator_specs(
     add_evaluator: str | None = None,
     profile: str | None = None,
     agent: str | None = None,
+    github_repo: str = "pytorch/pytorch",
+    persist: bool = False,
 ):
     from ptq.evaluator import ReviewerSpec
-    from ptq.evaluator.reviewer_profile import DEFAULT_PROFILE_MODEL, reviewer_profile_path
+    from ptq.evaluator.reviewer_profile import (
+        DEFAULT_PROFILE_MODEL,
+        generate_reviewer_profile,
+        reviewer_profile_path,
+    )
 
     specs: list[ReviewerSpec] = []
     raw_reviewers = evaluator_section.get("additional_reviewers")
@@ -953,25 +945,62 @@ def _additional_evaluator_specs(
             profile_value = str(item.get("profile") or "").strip()
             model = str(item.get("model") or DEFAULT_PROFILE_MODEL).strip()
             if name and profile_value and model:
+                profile_path = reviewer_profile_path(profile_value)
+                if _profile_should_be_generated(profile_value, profile_path):
+                    console.print(
+                        f"[dim]orchestrate:[/dim] generating evaluator profile "
+                        f"@{profile_value} -> {profile_path}",
+                        soft_wrap=True,
+                    )
+                    generate_reviewer_profile(profile_value, repo=github_repo)
                 specs.append(
                     ReviewerSpec(
                         name=name,
                         model=model,
-                        profile_path=str(reviewer_profile_path(profile_value)),
+                        profile_path=str(profile_path),
                     )
                 )
 
     if add_evaluator:
         if not profile:
             raise typer.BadParameter("--add-evaluator requires --profile.")
+        model = agent or DEFAULT_PROFILE_MODEL
+        profile_path = reviewer_profile_path(profile)
+        if _profile_should_be_generated(profile, profile_path):
+            console.print(
+                f"[dim]orchestrate:[/dim] generating evaluator profile "
+                f"@{profile} -> {profile_path}",
+                soft_wrap=True,
+            )
+            generate_reviewer_profile(profile, repo=github_repo)
+        if persist:
+            from ptq.config import ensure_additional_evaluator
+
+            if ensure_additional_evaluator(
+                name=add_evaluator,
+                profile=profile,
+                model=model,
+            ):
+                console.print(
+                    f"[dim]orchestrate:[/dim] saved evaluator "
+                    f"{add_evaluator} to ~/.ptq/config.toml",
+                    soft_wrap=True,
+                )
         specs.append(
             ReviewerSpec(
                 name=add_evaluator,
-                model=agent or DEFAULT_PROFILE_MODEL,
-                profile_path=str(reviewer_profile_path(profile)),
+                model=model,
+                profile_path=str(profile_path),
             )
         )
     return specs
+
+
+def _profile_should_be_generated(profile: str, path: Path) -> bool:
+    if path.exists():
+        return False
+    raw = Path(profile).expanduser()
+    return raw.suffix != ".md" and not raw.is_absolute() and len(raw.parts) == 1
 
 
 def _orchestrate_report_display(job_id: str | None) -> str | None:
@@ -1021,148 +1050,6 @@ def _print_orchestrate_results(results) -> None:
             console.print(f"  report.md: {report_display}", soft_wrap=True)
         if pr_url:
             console.print(f"  PR: {pr_url}", soft_wrap=True)
-
-
-@app.command()
-def evaluate(
-    job_id: Annotated[
-        str | None, typer.Argument(help="Job ID to evaluate.")
-    ] = None,
-    issue: Annotated[int | None, typer.Option(help="GitHub issue number.")] = None,
-) -> None:
-    """Run the evaluator against an existing solver job."""
-    from ptq.config import load_config
-    from ptq.evaluator import Evaluator, SolverOutput
-    from ptq.infrastructure.backends import backend_for_job
-    from ptq.issue import fetch_issue, format_issue_context
-    from ptq.repo_profiles import get_profile
-
-    cfg = load_config()
-    repo = _repo()
-    if job_id is None:
-        if issue is None:
-            raise typer.BadParameter("Provide a JOB_ID or --issue.")
-        job_id = _latest_job_for_issue(issue, repo)
-        if job_id is None:
-            raise typer.BadParameter(f"No job found for issue #{issue}.")
-    else:
-        try:
-            job_id = repo.resolve_id(job_id)
-        except PtqError as e:
-            _handle_error(e)
-
-    job = repo.get(job_id)
-    issue_number = issue or job.issue
-    if issue_number is None:
-        raise typer.BadParameter("Cannot evaluate an adhoc job without --issue.")
-
-    backend = backend_for_job(job)
-    profile = get_profile(job.repo)
-    job_dir = f"{backend.workspace}/jobs/{job_id}"
-    issue_data = fetch_issue(issue_number, repo=profile.github_repo)
-    status_text = _backend_text(backend, f"{job_dir}/status.json")
-    try:
-        status_json = json.loads(status_text) if status_text.strip() else {}
-    except json.JSONDecodeError:
-        status_json = {}
-
-    repro_filename = str(status_json.get("repro_file") or "")
-    if not repro_filename:
-        for candidate in (
-            f"repro_{issue_number}.py",
-            f"repro_{issue_number}_generated.py",
-            "repro.py",
-        ):
-            exists = backend.run(
-                f"test -f {job_dir}/{candidate}", check=False
-            ).returncode
-            if exists == 0:
-                repro_filename = candidate
-                break
-
-    evaluator_section = cfg.evaluator
-    evaluator = Evaluator(
-        reviewer_models=_evaluator_models(evaluator_section),
-        additional_reviewers=_additional_evaluator_specs(evaluator_section),
-        approval_threshold=float(evaluator_section.get("approval_threshold", 0.8)),
-        shelve_threshold=float(evaluator_section.get("shelve_threshold", 0.3)),
-        max_iterations=int(evaluator_section.get("max_iterations", 5)),
-    )
-    worktree_path = None
-    if job.local:
-        worktree_path = (
-            Path(job_dir.replace("~", str(Path.home()))) / profile.dir_name
-        )
-
-    review = evaluator.evaluate(
-        SolverOutput(
-            issue_number=issue_number,
-            issue_body=format_issue_context(issue_data, issue_number),
-            iteration=job.runs,
-            report_md=_backend_text(backend, f"{job_dir}/report.md"),
-            fix_diff=_backend_text(backend, f"{job_dir}/fix.diff"),
-            repro_script=(
-                _backend_text(backend, f"{job_dir}/{repro_filename}")
-                if repro_filename
-                else ""
-            ),
-            repro_filename=repro_filename,
-            status_json=status_json,
-            worktree_path=worktree_path,
-        )
-    )
-
-    review_text = json.dumps(review.to_dict(), indent=2)
-    backend.run(
-        f"cat > {job_dir}/review.json << 'PTQ_REVIEW_EOF'\n{review_text}\nPTQ_REVIEW_EOF"
-    )
-    console.print(review_text)
-
-
-@app.command("generate-review-profile")
-def generate_review_profile(
-    username: Annotated[
-        str,
-        typer.Argument(help="GitHub username to model, e.g. aditvenk."),
-    ],
-    repo: Annotated[
-        str,
-        typer.Option("--repo", help="GitHub repo to scan for reviewed PRs."),
-    ] = "pytorch/pytorch",
-    months: Annotated[
-        int,
-        typer.Option(
-            "--months",
-            help="How many months of reviewed PR activity to scan.",
-        ),
-    ] = 6,
-    limit: Annotated[
-        int,
-        typer.Option(help="Maximum reviewed PRs to inspect."),
-    ] = 100,
-    output: Annotated[
-        Path | None,
-        typer.Option(help="Profile markdown output path."),
-    ] = None,
-) -> None:
-    """Generate a Markdown evaluator profile from a user's GitHub reviews."""
-    from ptq.evaluator.reviewer_profile import generate_reviewer_profile
-
-    try:
-        profile = generate_reviewer_profile(
-            username,
-            repo=repo,
-            months=months,
-            limit=limit,
-            output=output,
-        )
-    except PtqError as e:
-        _handle_error(e)
-    console.print(
-        f"Wrote reviewer profile for @{profile.username}: {profile.path}",
-        soft_wrap=True,
-    )
-    console.print(f"  sampled PRs={profile.pr_count} comments={profile.comment_count}")
 
 
 @app.command()
@@ -1357,6 +1244,8 @@ def orchestrate(
             add_evaluator=add_evaluator,
             profile=evaluator_profile,
             agent=evaluator_agent,
+            github_repo=github_repo,
+            persist=bool(add_evaluator),
         ),
         approval_threshold=float(evaluator_cfg.get("approval_threshold", 0.8)),
         shelve_threshold=float(evaluator_cfg.get("shelve_threshold", 0.3)),
