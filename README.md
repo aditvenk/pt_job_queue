@@ -142,14 +142,18 @@ artifacts and returns structured feedback:
 - blocking/suggestion/nit comments
 - reviewer-specific scores
 
-By default every diff is reviewed by two reviewer models:
+By default every diff is first reviewed by two reviewer models:
 
 - `gpt-5.5`
 - `claude-opus-4-7`
 
-The diff is not considered ready for human review unless all reviewers score it
-above the configured approval threshold. You can add a profile-backed reviewer as
-another required evaluator:
+Profile-backed reviewers run as a second stage only after those agent reviewers
+approve. If any profile-backed reviewer requests revision, that issue escalates
+into full-review mode, and every later iteration runs all reviewers together.
+The diff is not considered ready for human review unless every reviewer in the
+active stage scores it above the configured approval threshold.
+
+You can add a profile-backed reviewer as another required evaluator:
 
 ```bash
 uv run ptq orchestrate \
@@ -372,7 +376,7 @@ github_repo = "pytorch/pytorch"
 issue_selection_prompt = "open issues labeled 'module: nn' with a repro script, filed in the last 30 days"
 max_issues = 20
 parallel = 4
-max_iterations = 5
+max_iterations = 10
 approval_threshold = 0.8
 machine = "localhost"
 watch_pr = false
@@ -386,7 +390,7 @@ models = ["gpt-5.5", "claude-opus-4-7"]
 # ]
 approval_threshold = 0.8
 shelve_threshold = 0.3
-max_iterations = 5
+max_iterations = 10
 ```
 
 The orchestrator uses the default solver agent/model from the normal PTQ

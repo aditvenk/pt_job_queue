@@ -1342,7 +1342,7 @@ def orchestrate(
         github_repo=github_repo,
         max_issues=max_issues_value,
         parallel=parallel_value,
-        max_iterations=int(max_iterations or orch.get("max_iterations", 5)),
+        max_iterations=int(max_iterations or orch.get("max_iterations", 10)),
         approval_threshold=float(orch.get("approval_threshold", 0.8)),
         machine=str(machine or orch.get("machine", "localhost")),
         dry_run=dry_run,

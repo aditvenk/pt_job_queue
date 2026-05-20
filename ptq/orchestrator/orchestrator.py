@@ -101,6 +101,7 @@ class Orchestrator:
     async def solve_issue(self, issue: Issue) -> SolveResult:
         review = None
         job_id = None
+        full_review_mode = self._full_review_mode(issue)
         try:
             for iteration in range(1, self.config.max_iterations + 1):
                 self._progress(f"#{issue.number} iteration {iteration}: launching solver")
@@ -128,10 +129,11 @@ class Orchestrator:
                 solver_output = await self._read_solver_output(
                     issue=issue, job_id=job_id, iteration=iteration
                 )
-                self._progress(
-                    f"#{issue.number} iteration {iteration}: running evaluator"
+                review, full_review_mode = await self._evaluate_solver_output(
+                    issue=issue,
+                    solver_output=solver_output,
+                    full_review_mode=full_review_mode,
                 )
-                review = await asyncio.to_thread(self.evaluator.evaluate, solver_output)
                 await self._write_review_artifact(job_id, review)
                 self._progress(_format_review_snapshot(review))
                 self.reporter.log(
@@ -176,6 +178,64 @@ class Orchestrator:
                 state="error",
                 error=str(exc),
             )
+
+    async def _evaluate_solver_output(
+        self,
+        *,
+        issue: Issue,
+        solver_output: SolverOutput,
+        full_review_mode: bool,
+    ) -> tuple[ReviewResult, bool]:
+        iteration = int(getattr(solver_output, "iteration", 0) or 0)
+        has_additional_reviewers = getattr(
+            self.evaluator,
+            "has_additional_reviewers",
+            lambda: False,
+        )
+        if full_review_mode or not has_additional_reviewers():
+            mode = "full" if full_review_mode else "agent"
+            self._progress(
+                f"#{issue.number} iteration {iteration}: running {mode} evaluator"
+            )
+            review = await asyncio.to_thread(self.evaluator.evaluate, solver_output)
+            return review, full_review_mode
+
+        self._progress(
+            f"#{issue.number} iteration {iteration}: running agent evaluators"
+        )
+        agent_review = await asyncio.to_thread(
+            self.evaluator.evaluate_base_reviewers,
+            solver_output,
+        )
+        if agent_review.verdict != "approved":
+            return agent_review, False
+
+        self._progress(
+            f"#{issue.number} iteration {iteration}: agent evaluators approved; "
+            "running human-profile evaluators"
+        )
+        profile_review = await asyncio.to_thread(
+            self.evaluator.evaluate_additional_reviewers,
+            solver_output,
+        )
+        review = self.evaluator.combine_reviews(
+            [agent_review, profile_review],
+            iteration=iteration,
+        )
+        if profile_review.verdict != "approved":
+            self._set_full_review_mode(issue, True)
+            self._progress(
+                f"#{issue.number}: human-profile evaluator requested revisions; "
+                "future iterations will run all evaluators"
+            )
+            self.reporter.log(
+                "review_mode_escalated",
+                issue=issue.number,
+                iteration=iteration,
+                profile_review=profile_review.to_dict(),
+            )
+            return review, True
+        return review, False
 
     async def post_process(self, result: SolveResult) -> None:
         if result.verdict == "approved" and result.job_id:
@@ -426,6 +486,41 @@ class Orchestrator:
             local=self.config.local,
             repo=self.config.repo,
         )
+
+    @property
+    def _review_mode_state_path(self) -> Path:
+        return self.config.log_path.parent / "review_modes.json"
+
+    def _review_mode_key(self, issue: Issue) -> str:
+        return f"{self.config.repo}:{issue.number}"
+
+    def _full_review_mode(self, issue: Issue) -> bool:
+        path = self._review_mode_state_path
+        if not path.exists():
+            return False
+        try:
+            data = json.loads(path.read_text())
+        except json.JSONDecodeError:
+            return False
+        entry = data.get(self._review_mode_key(issue))
+        return bool(isinstance(entry, dict) and entry.get("full_review_mode"))
+
+    def _set_full_review_mode(self, issue: Issue, enabled: bool) -> None:
+        path = self._review_mode_state_path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if path.exists():
+            try:
+                data = json.loads(path.read_text())
+            except json.JSONDecodeError:
+                data = {}
+        else:
+            data = {}
+        key = self._review_mode_key(issue)
+        if enabled:
+            data[key] = {"full_review_mode": True}
+        else:
+            data.pop(key, None)
+        path.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n")
 
     async def _fetch_pr_feedback(self, issue: Issue) -> dict | None:
         existing_job_id = self._existing_job_id(issue)

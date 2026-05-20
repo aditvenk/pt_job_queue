@@ -84,7 +84,7 @@ github_repo = "pytorch/pytorch"
 issue_selection_prompt = "open issues labeled 'module: nn' with a repro script, filed in the last 30 days"
 max_issues = 20
 parallel = 4
-max_iterations = 5
+max_iterations = 10
 approval_threshold = 0.8
 machine = "localhost"
 watch_pr = false
@@ -99,7 +99,7 @@ models = ["gpt-5.5", "claude-opus-4-7"]
 # ]
 approval_threshold = 0.8
 shelve_threshold = 0.3
-max_iterations = 5
+max_iterations = 10
 """
 
 

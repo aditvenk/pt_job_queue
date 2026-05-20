@@ -24,7 +24,7 @@ class OrchestratorConfig:
     github_repo: str = "pytorch/pytorch"
     max_issues: int = 20
     parallel: int = 4
-    max_iterations: int = 5
+    max_iterations: int = 10
     approval_threshold: float = 0.8
     machine: str = "localhost"
     dry_run: bool = False

@@ -5,7 +5,7 @@ from subprocess import CompletedProcess
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from ptq.evaluator import Evaluator
+from ptq.evaluator import Evaluator, SolverOutput
 from ptq.evaluator.models import ReviewComment, ReviewResult, ReviewerSpec
 
 from ptq.orchestrator.issue_selector import (
@@ -214,6 +214,135 @@ def test_pr_feedback_updates_matching_evaluator_profile(tmp_path):
     text = profile.read_text()
     assert "Please add a BC note for this path." in text
     assert "Do not include this." not in text
+
+
+def test_staged_evaluator_escalates_after_profile_rejection(tmp_path):
+    calls = []
+
+    class StagedEvaluator(Evaluator):
+        def _call_llm(self, prompt: str, model_name: str | None = None) -> str:
+            calls.append(model_name)
+            approved = model_name != "human-profile-model"
+            return (
+                "{"
+                f'"verdict": "{"approved" if approved else "needs_revision"}",'
+                f'"score": {0.9 if approved else 0.7},'
+                '"iteration": 1,'
+                '"repro_fidelity": "faithful",'
+                '"comments": [],'
+                f'"summary": "{model_name} review"'
+                "}"
+            )
+
+        def _run_lint(self, worktree_path):
+            return "Not run in unit test."
+
+    evaluator = StagedEvaluator(
+        reviewer_models=["gpt-5.5", "claude-opus-4-7"],
+        additional_reviewers=[
+            ReviewerSpec(
+                name="aditvenk-style",
+                model="human-profile-model",
+                profile_text="Review like aditvenk.",
+            )
+        ],
+    )
+    orchestrator = Orchestrator(
+        OrchestratorConfig(
+            issue_selection_prompt="open bugs",
+            log_path=tmp_path / "runs.jsonl",
+        ),
+        evaluator=evaluator,
+    )
+    issue = Issue(number=123, title="bug")
+    output = SolverOutput(
+        issue_number=123,
+        issue_body="body",
+        iteration=1,
+        report_md="report",
+        fix_diff="diff",
+        repro_script="import torch",
+        repro_filename="repro_123_generated.py",
+    )
+
+    review, full_mode = asyncio.run(
+        orchestrator._evaluate_solver_output(
+            issue=issue,
+            solver_output=output,
+            full_review_mode=False,
+        )
+    )
+
+    assert full_mode is True
+    assert orchestrator._full_review_mode(issue) is True
+    assert review.verdict == "needs_revision"
+    assert {item["reviewer"] for item in review.reviewer_results} == {
+        "gpt-5.5",
+        "claude-opus-4-7",
+        "aditvenk-style",
+    }
+    assert calls.count("human-profile-model") == 1
+
+
+def test_staged_evaluator_skips_profiles_until_agents_approve(tmp_path):
+    calls = []
+
+    class RejectingAgentEvaluator(Evaluator):
+        def _call_llm(self, prompt: str, model_name: str | None = None) -> str:
+            calls.append(model_name)
+            approved = model_name != "gpt-5.5"
+            return (
+                "{"
+                f'"verdict": "{"approved" if approved else "needs_revision"}",'
+                f'"score": {0.9 if approved else 0.7},'
+                '"iteration": 1,'
+                '"repro_fidelity": "faithful",'
+                '"comments": [],'
+                f'"summary": "{model_name} review"'
+                "}"
+            )
+
+        def _run_lint(self, worktree_path):
+            return "Not run in unit test."
+
+    evaluator = RejectingAgentEvaluator(
+        reviewer_models=["gpt-5.5", "claude-opus-4-7"],
+        additional_reviewers=[
+            ReviewerSpec(
+                name="aditvenk-style",
+                model="human-profile-model",
+                profile_text="Review like aditvenk.",
+            )
+        ],
+    )
+    orchestrator = Orchestrator(
+        OrchestratorConfig(
+            issue_selection_prompt="open bugs",
+            log_path=tmp_path / "runs.jsonl",
+        ),
+        evaluator=evaluator,
+    )
+    output = SolverOutput(
+        issue_number=123,
+        issue_body="body",
+        iteration=1,
+        report_md="report",
+        fix_diff="diff",
+        repro_script="import torch",
+        repro_filename="repro_123_generated.py",
+    )
+
+    review, full_mode = asyncio.run(
+        orchestrator._evaluate_solver_output(
+            issue=Issue(number=123, title="bug"),
+            solver_output=output,
+            full_review_mode=False,
+        )
+    )
+
+    assert full_mode is False
+    assert review.verdict == "needs_revision"
+    assert "human-profile-model" not in calls
 
 
 def test_launch_solver_uses_configured_repo_profile(tmp_path):

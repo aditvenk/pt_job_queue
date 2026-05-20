@@ -39,7 +39,7 @@ class Evaluator:
     additional_reviewers: list[ReviewerSpec] = field(default_factory=list)
     approval_threshold: float = 0.8
     shelve_threshold: float = 0.3
-    max_iterations: int = 5
+    max_iterations: int = 10
 
     def validate_configuration(self) -> None:
         missing: list[str] = []
@@ -67,6 +67,47 @@ class Evaluator:
             )
 
     def evaluate(self, solver_output: SolverOutput) -> ReviewResult:
+        return self._evaluate_reviewers(solver_output, self._effective_reviewers())
+
+    def evaluate_base_reviewers(self, solver_output: SolverOutput) -> ReviewResult:
+        return self._evaluate_reviewers(solver_output, self._base_reviewers())
+
+    def evaluate_additional_reviewers(self, solver_output: SolverOutput) -> ReviewResult:
+        return self._evaluate_reviewers(
+            solver_output,
+            self._additional_reviewers(),
+        )
+
+    def has_additional_reviewers(self) -> bool:
+        return bool(self.additional_reviewers)
+
+    def combine_reviews(
+        self,
+        reviews: list[ReviewResult],
+        *,
+        iteration: int,
+    ) -> ReviewResult:
+        reviewer_results: list[ReviewResult] = []
+        for review in reviews:
+            if review.reviewer_results:
+                reviewer_results.extend(
+                    ReviewResult.from_dict(result, iteration=iteration)
+                    for result in review.reviewer_results
+                    if isinstance(result, dict)
+                )
+            else:
+                reviewer_results.append(review)
+        return self._aggregate_reviewer_results(
+            reviewer_results,
+            repro_comments=[],
+            iteration=iteration,
+        )
+
+    def _evaluate_reviewers(
+        self,
+        solver_output: SolverOutput,
+        reviewers: list[ReviewerSpec],
+    ) -> ReviewResult:
         repro_check = validate_repro_presence(
             issue_number=solver_output.issue_number,
             repro_filename=solver_output.repro_filename,
@@ -102,7 +143,7 @@ class Evaluator:
             lint_output=lint_output,
         )
         reviewer_results = self._evaluate_all_reviewers(
-            self._effective_reviewers(),
+            reviewers,
             prompt,
             iteration=solver_output.iteration,
         )
@@ -150,11 +191,14 @@ class Evaluator:
             return [self.model.strip()]
         return ["gpt-5.5", "claude-opus-4-7"]
 
-    def _effective_reviewers(self) -> list[ReviewerSpec]:
-        reviewers = [
+    def _base_reviewers(self) -> list[ReviewerSpec]:
+        return [
             ReviewerSpec.from_model(model)
             for model in self._effective_reviewer_models()
         ]
+
+    def _additional_reviewers(self) -> list[ReviewerSpec]:
+        reviewers = []
         for reviewer in self.additional_reviewers:
             try:
                 reviewers.append(reviewer.with_loaded_profile())
@@ -164,6 +208,9 @@ class Evaluator:
                     f"{reviewer.profile_path}"
                 ) from exc
         return reviewers
+
+    def _effective_reviewers(self) -> list[ReviewerSpec]:
+        return [*self._base_reviewers(), *self._additional_reviewers()]
 
     def _evaluate_with_reviewer(
         self, reviewer: ReviewerSpec, prompt: str, *, iteration: int
