@@ -704,6 +704,7 @@ class Orchestrator:
             report_md=report_md,
             fix_diff=fix_diff,
             repro_script=repro_script,
+            user_message=self.config.initial_message or "",
             repro_filename=repro_filename,
             status_json=status_json,
             worktree_path=worktree_path,

@@ -32,6 +32,7 @@ class SolverOutput:
     report_md: str
     fix_diff: str
     repro_script: str
+    user_message: str = ""
     repro_filename: str = ""
     status_json: dict = field(default_factory=dict)
     worktree_path: Path | None = None
@@ -136,6 +137,7 @@ class Evaluator:
         prompt = build_evaluation_prompt(
             issue_number=solver_output.issue_number,
             issue_body=solver_output.issue_body,
+            user_message=solver_output.user_message,
             repro_filename=solver_output.repro_filename,
             repro_script=solver_output.repro_script,
             fix_diff=solver_output.fix_diff,

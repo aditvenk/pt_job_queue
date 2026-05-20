@@ -134,6 +134,31 @@ def test_component_scores_are_source_of_truth():
     assert round(result.reviewer_results[0]["score"], 2) == 0.6
 
 
+def test_user_message_is_included_in_evaluator_prompt():
+    prompts = []
+
+    class PromptCapturingEvaluator(FakeEvaluator):
+        def _call_llm(self, prompt: str, model_name: str | None = None) -> str:
+            prompts.append(prompt)
+            return super()._call_llm(prompt, model_name)
+
+    PromptCapturingEvaluator(reviewer_models=["fake-reviewer"]).evaluate(
+        SolverOutput(
+            issue_number=174923,
+            issue_body="expected RuntimeError",
+            iteration=1,
+            report_md="",
+            fix_diff="",
+            repro_script="import torch",
+            user_message="just answer why CI is not catching these failures",
+            repro_filename="repro_174923_generated.py",
+        )
+    )
+    assert prompts
+    assert "Human Task / Message Prior" in prompts[0]
+    assert "just answer why CI is not catching these failures" in prompts[0]
+
+
 def test_all_reviewers_must_approve():
     class SplitEvaluator(FakeEvaluator):
         def _call_llm(self, prompt: str, model_name: str | None = None) -> str:

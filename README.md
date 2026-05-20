@@ -109,7 +109,7 @@ Useful flags:
 | `--repo NAME` | PTQ repo profile to run against, such as `pytorch` or `torchtitan`; default comes from config. |
 | `--issue N` | Run one explicit issue in the selected repo. |
 | `--prompt TEXT` | Natural-language GitHub issue selection criteria. |
-| `--message/-m TEXT` | Initial solver guidance to include alongside the issue. |
+| `--message/-m TEXT` | Initial solver guidance to include alongside the issue; evaluators also use it as a task prior when judging whether the output stayed in scope. |
 | `--parallel N` | Number of concurrent solver/evaluator loops. |
 | `--max-iterations N` | Max solver/evaluator iterations per issue. |
 | `--machine NAME` | Remote machine, or `localhost`/`local` for local worktrees. |

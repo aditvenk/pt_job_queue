@@ -29,6 +29,7 @@ def build_evaluation_prompt(
     *,
     issue_number: int,
     issue_body: str,
+    user_message: str,
     repro_filename: str,
     repro_script: str,
     fix_diff: str,
@@ -63,11 +64,13 @@ Step 1 - Fix Correctness
 - Does the fix address the root cause described in report.md?
 - Does the repro pass after the fix is applied?
 - Are obvious edge cases missed?
+- Does the solver output satisfy the human task/message, if one was provided?
 - Return this as `component_scores.fix_correctness`.
 
 Step 2 - Scope and Minimality
 - Is the change minimal and focused?
 - No unrelated refactoring?
+- Is the change within the scope requested by the human task/message?
 - Return this as `component_scores.scope_minimality`.
 
 Step 3 - Test Coverage
@@ -100,6 +103,17 @@ Step 4 - Code Quality
 - Approval threshold: {approval_threshold}
 - Shelve threshold: {shelve_threshold}
 - Repro file: {repro_filename or "(missing)"}
+
+### Human Task / Message Prior
+
+The user may have provided an additional message when launching orchestrate.
+Treat this as task context and a constraint on what the solver should do.
+If the message asks for analysis, explanation, or a narrow investigation rather
+than a code fix, evaluate whether the solver respected that request. Code
+changes outside the requested scope should lower correctness and/or
+scope_minimality and should receive blocking feedback.
+
+{user_message or "(none provided)"}
 
 ### Solver status.json
 
