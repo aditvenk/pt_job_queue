@@ -433,12 +433,51 @@ class Orchestrator:
             return None
         from ptq.application.pr_service import fetch_pr_feedback
 
-        return await asyncio.to_thread(
+        feedback = await asyncio.to_thread(
             fetch_pr_feedback,
             self.job_repo,
             existing_job_id,
             log=lambda msg: self._progress(f"#{issue.number}: pr: {msg}"),
         )
+        if feedback:
+            updated = await self._update_reviewer_profiles_from_pr_feedback(feedback)
+            if updated:
+                self._progress(
+                    f"#{issue.number}: incorporated {updated} PR feedback "
+                    "item(s) into evaluator profiles"
+                )
+                self.reporter.log(
+                    "evaluator_profile_update",
+                    issue=issue.number,
+                    updated_comments=updated,
+                    pr_url=feedback.get("pr_url"),
+                )
+        return feedback
+
+    async def _update_reviewer_profiles_from_pr_feedback(self, feedback: dict) -> int:
+        reviewers = getattr(self.evaluator, "additional_reviewers", [])
+        if not reviewers:
+            return 0
+        from ptq.evaluator.reviewer_profile import (
+            append_pr_feedback_to_profile,
+            profile_username,
+        )
+
+        def update() -> int:
+            total = 0
+            for reviewer in reviewers:
+                profile_path = getattr(reviewer, "profile_path", "")
+                if not profile_path:
+                    continue
+                username = profile_username(profile_path)
+                total += append_pr_feedback_to_profile(
+                    profile_path,
+                    username=username,
+                    feedback=feedback,
+                )
+            return total
+
+        return await asyncio.to_thread(update)
 
     async def _wait_for_job(self, job_id: str) -> None:
         polls = 0

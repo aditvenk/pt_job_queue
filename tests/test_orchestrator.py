@@ -5,7 +5,8 @@ from subprocess import CompletedProcess
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from ptq.evaluator.models import ReviewComment, ReviewResult
+from ptq.evaluator import Evaluator
+from ptq.evaluator.models import ReviewComment, ReviewResult, ReviewerSpec
 
 from ptq.orchestrator.issue_selector import (
     IssueSelector,
@@ -161,6 +162,58 @@ def test_solve_issue_injects_pr_feedback_when_present(tmp_path):
     assert captured["pr_feedback"]["comments"][0]["body"] == (
         "Please handle the no_grad case."
     )
+
+
+def test_pr_feedback_updates_matching_evaluator_profile(tmp_path):
+    profile = tmp_path / "aditvenk.md"
+    profile.write_text(
+        "# @aditvenk Review Profile\n\n"
+        "## Evaluator Instructions\n\n"
+        "- Prefer direct review comments.\n"
+    )
+    evaluator = Evaluator(
+        additional_reviewers=[
+            ReviewerSpec(
+                name="aditvenk-style",
+                model="gpt-5.5",
+                profile_path=str(profile),
+            )
+        ]
+    )
+    orchestrator = Orchestrator(
+        OrchestratorConfig(
+            issue_selection_prompt="open bugs",
+            log_path=tmp_path / "runs.jsonl",
+        ),
+        evaluator=evaluator,
+    )
+    feedback = {
+        "pr_url": "https://github.com/pytorch/pytorch/pull/123",
+        "comments": [
+            {
+                "kind": "inline",
+                "id": 10,
+                "author": "aditvenk",
+                "path": "torch/foo.py",
+                "line": 12,
+                "body": "Please add a BC note for this path.",
+                "url": "https://github.com/pytorch/pytorch/pull/123#discussion_r10",
+            },
+            {
+                "kind": "conversation",
+                "id": 11,
+                "author": "other-reviewer",
+                "body": "Do not include this.",
+            },
+        ],
+    }
+
+    update = orchestrator._update_reviewer_profiles_from_pr_feedback
+    assert asyncio.run(update(feedback)) == 1
+    assert asyncio.run(update(feedback)) == 0
+    text = profile.read_text()
+    assert "Please add a BC note for this path." in text
+    assert "Do not include this." not in text
 
 
 def test_launch_solver_uses_configured_repo_profile(tmp_path):

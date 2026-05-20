@@ -7,6 +7,7 @@ import subprocess
 from collections import Counter
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from hashlib import sha1
 from pathlib import Path
 from typing import Any
 
@@ -75,6 +76,61 @@ def generate_reviewer_profile(
         pr_count=len(prs),
         comment_count=len(comments),
     )
+
+
+def profile_username(profile_path: str | Path) -> str:
+    path = Path(profile_path).expanduser()
+    if path.exists():
+        match = re.search(
+            r"^#\s+@([A-Za-z0-9-]+)\s+Review Profile\s*$",
+            path.read_text(errors="replace"),
+            re.MULTILINE,
+        )
+        if match:
+            return match.group(1)
+    return path.stem
+
+
+def append_pr_feedback_to_profile(
+    profile_path: str | Path,
+    *,
+    username: str,
+    feedback: dict,
+) -> int:
+    path = Path(profile_path).expanduser()
+    if not path.exists():
+        return 0
+    comments = _matching_feedback_comments(username, feedback)
+    if not comments:
+        return 0
+
+    text = path.read_text()
+    blocks = []
+    for comment in comments:
+        marker = _feedback_marker(comment)
+        if marker in text:
+            continue
+        blocks.append(_feedback_block(comment, marker))
+    if not blocks:
+        return 0
+
+    if "## Recent PR Feedback Incorporated" not in text:
+        if not text.endswith("\n"):
+            text += "\n"
+        text += "\n## Recent PR Feedback Incorporated\n\n"
+        text += (
+            "These are fresh human-review comments observed by ptq while "
+            "watching draft PRs. Treat them as high-signal examples of this "
+            "reviewer's current expectations.\n\n"
+        )
+    elif not text.endswith("\n"):
+        text += "\n"
+
+    text += "\n".join(blocks)
+    if not text.endswith("\n"):
+        text += "\n"
+    path.write_text(text)
+    return len(blocks)
 
 
 def _since_date(months: int) -> str:
@@ -168,6 +224,61 @@ def _comment_entry(
         "url": str(item.get("html_url") or item.get("url") or ""),
         "created_at": str(item.get("created_at") or item.get("submitted_at") or ""),
     }
+
+
+def _matching_feedback_comments(username: str, feedback: dict) -> list[dict]:
+    comments = feedback.get("comments")
+    if not isinstance(comments, list):
+        return []
+    username = username.lstrip("@").lower()
+    matched = []
+    for item in comments:
+        if not isinstance(item, dict):
+            continue
+        author = str(item.get("author") or "").lstrip("@").lower()
+        body = str(item.get("body") or "").strip()
+        if author == username and body:
+            matched.append(item)
+    return matched
+
+
+def _feedback_marker(comment: dict) -> str:
+    raw = "|".join(
+        str(comment.get(key) or "")
+        for key in ("id", "url", "author", "path", "line", "body")
+    )
+    digest = sha1(raw.encode("utf-8")).hexdigest()[:16]
+    return f"<!-- ptq:profile-feedback:{digest} -->"
+
+
+def _feedback_block(comment: dict, marker: str) -> str:
+    kind = str(comment.get("kind") or "comment")
+    author = str(comment.get("author") or "reviewer")
+    url = str(comment.get("url") or "")
+    created_at = str(
+        comment.get("created_at")
+        or comment.get("submitted_at")
+        or datetime.now(timezone.utc).date().isoformat()
+    )
+    loc = str(comment.get("path") or kind)
+    line = comment.get("line")
+    if line is not None:
+        loc = f"{loc}:{line}"
+    body = _quote_feedback(str(comment.get("body") or ""))
+    url_suffix = f" ({url})" if url else ""
+    return (
+        f"{marker}\n"
+        f"- {created_at} @{author} on `{loc}` [{kind}]{url_suffix}\n"
+        f"{body}\n"
+    )
+
+
+def _quote_feedback(text: str) -> str:
+    cleaned = _clean_markdown(text)
+    if not cleaned:
+        return "  > (empty comment)"
+    wrapped = _truncate(cleaned, _MAX_EXCERPT_CHARS)
+    return "\n".join(f"  > {line}" for line in wrapped.splitlines())
 
 
 def _repo_full_name(pr: dict) -> str:
