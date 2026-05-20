@@ -12,7 +12,12 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from ptq.evaluator.models import ReviewComment, ReviewResult, ReviewerSpec
+from ptq.evaluator.models import (
+    COMPONENT_SCORE_KEYS,
+    ReviewComment,
+    ReviewResult,
+    ReviewerSpec,
+)
 from ptq.evaluator.repro_validator import validate_repro_presence
 from ptq.evaluator.rubric import build_evaluation_prompt
 
@@ -247,32 +252,33 @@ class Evaluator:
                 summary="No evaluator reviewers were configured.",
             )
 
-        min_score = min(result.score for result in reviewer_results)
+        component_scores = _aggregate_component_scores(reviewer_results)
+        score = (
+            min(component_scores.values())
+            if component_scores
+            else min(result.score for result in reviewer_results)
+        )
         reviewer_data = [result.to_dict() for result in reviewer_results]
         repro_fidelity = _aggregate_repro_fidelity(reviewer_results)
         if any(result.repro_fidelity == "unfaithful" for result in reviewer_results):
             verdict = "needs_revision"
             score = 0.0
-        elif all(
-            result.verdict == "approved" and result.score >= self.approval_threshold
-            for result in reviewer_results
-        ):
+        elif self._all_reviewers_approved(reviewer_results, component_scores):
             verdict = "approved"
-            score = min_score
         elif (
             iteration >= self.max_iterations
-            and min_score < self.shelve_threshold
-            and all(result.score < self.approval_threshold for result in reviewer_results)
+            and score < self.shelve_threshold
+            and not self._any_reviewer_approved(reviewer_results)
         ):
             verdict = "shelve"
-            score = min_score
         else:
             verdict = "needs_revision"
-            score = min_score
 
         summary_lines = [
             f"{result.reviewer}: {result.verdict} "
-            f"score={result.score:.2f}. {result.summary}".strip()
+            f"score={result.score:.2f}"
+            f"{_component_score_suffix(result.component_scores)}. "
+            f"{result.summary}".strip()
             for result in reviewer_results
         ]
         if verdict != "approved":
@@ -291,6 +297,7 @@ class Evaluator:
             score=score,
             iteration=iteration,
             repro_fidelity=repro_fidelity,  # type: ignore[arg-type]
+            component_scores=component_scores,
             comments=comments,
             summary=summary,
             reviewer="aggregate",
@@ -302,7 +309,14 @@ class Evaluator:
             result.score = 0.0
             result.verdict = "needs_revision"
             return result
-        if result.score >= self.approval_threshold:
+        if result.component_scores:
+            approved = all(
+                result.component_scores[key] >= self.approval_threshold
+                for key in COMPONENT_SCORE_KEYS
+            )
+        else:
+            approved = result.score >= self.approval_threshold
+        if approved:
             result.verdict = "approved"
         elif (
             result.iteration >= self.max_iterations
@@ -312,6 +326,26 @@ class Evaluator:
         else:
             result.verdict = "needs_revision"
         return result
+
+    def _all_reviewers_approved(
+        self,
+        reviewer_results: list[ReviewResult],
+        component_scores: dict[str, float],
+    ) -> bool:
+        if not all(result.verdict == "approved" for result in reviewer_results):
+            return False
+        if component_scores:
+            return all(
+                component_scores[key] >= self.approval_threshold
+                for key in COMPONENT_SCORE_KEYS
+            )
+        return all(result.score >= self.approval_threshold for result in reviewer_results)
+
+    def _any_reviewer_approved(self, reviewer_results: list[ReviewResult]) -> bool:
+        return any(
+            result.verdict == "approved" and result.score >= self.approval_threshold
+            for result in reviewer_results
+        )
 
     def _run_lint(self, worktree_path: Path | None) -> str:
         if worktree_path is None:
@@ -383,6 +417,34 @@ def _aggregate_repro_fidelity(results: list[ReviewResult]) -> str:
     if values <= {"faithful", "from_issue"}:
         return "faithful"
     return "uncertain"
+
+
+def _aggregate_component_scores(results: list[ReviewResult]) -> dict[str, float]:
+    if not results or any(not result.component_scores for result in results):
+        return {}
+    return {
+        key: min(result.component_scores[key] for result in results)
+        for key in COMPONENT_SCORE_KEYS
+    }
+
+
+def _component_score_suffix(component_scores: dict[str, float]) -> str:
+    if not component_scores:
+        return ""
+    parts = [
+        f"{_short_component_name(key)}={component_scores[key]:.2f}"
+        for key in COMPONENT_SCORE_KEYS
+    ]
+    return " [" + ", ".join(parts) + "]"
+
+
+def _short_component_name(key: str) -> str:
+    return {
+        "fix_correctness": "correctness",
+        "scope_minimality": "scope",
+        "test_coverage": "tests",
+        "code_quality": "quality",
+    }.get(key, key)
 
 
 def _extract_json_object(text: str) -> dict:

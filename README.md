@@ -138,9 +138,25 @@ artifacts and returns structured feedback:
 
 - `verdict`: `approved`, `needs_revision`, or `shelve`
 - `score`: `0.0` to `1.0`
+- component scores for fix correctness, scope/minimality, test coverage, and
+  code quality
 - repro fidelity status
 - blocking/suggestion/nit comments
-- reviewer-specific scores
+- reviewer-specific scores and component scores
+
+Each reviewer scores the same four rubric components:
+
+- `fix_correctness`
+- `scope_minimality`
+- `test_coverage`
+- `code_quality`
+
+The evaluator treats those component scores as the source of truth. The
+aggregate review records the lowest score seen for each component across all
+active reviewers, so the solver can see whether the weak point was correctness,
+scope, tests, or quality. The legacy scalar `score` is kept for CLI summaries
+and compatibility, but it is derived as the weakest component rather than as a
+weighted average.
 
 By default every diff is first reviewed by two reviewer models:
 

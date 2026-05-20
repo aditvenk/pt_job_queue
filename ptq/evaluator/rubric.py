@@ -4,7 +4,13 @@ import json
 
 REVIEW_JSON_SCHEMA = {
     "verdict": "approved | needs_revision | shelve",
-    "score": "float from 0.0 to 1.0",
+    "score": "weakest component score from 0.0 to 1.0",
+    "component_scores": {
+        "fix_correctness": "float from 0.0 to 1.0",
+        "scope_minimality": "float from 0.0 to 1.0",
+        "test_coverage": "float from 0.0 to 1.0",
+        "code_quality": "float from 0.0 to 1.0",
+    },
     "iteration": "integer",
     "repro_fidelity": "faithful | unfaithful | uncertain | from_issue",
     "comments": [
@@ -53,30 +59,37 @@ Step 0 - Repro Fidelity (BLOCKING, gate check)
 - If the repro was extracted directly from the issue (`repro_<issue>.py`), check only that it appears faithfully transcribed and set `repro_fidelity` to `from_issue`.
 - If the repro is unfaithful, immediately return `verdict="needs_revision"`, `score=0.0`, and comments telling the solver to fix the repro first. Do not evaluate the fix.
 
-Step 1 - Fix Correctness (weight: 0.4)
+Step 1 - Fix Correctness
 - Does the fix address the root cause described in report.md?
 - Does the repro pass after the fix is applied?
 - Are obvious edge cases missed?
+- Return this as `component_scores.fix_correctness`.
 
-Step 2 - Scope and Minimality (weight: 0.2)
+Step 2 - Scope and Minimality
 - Is the change minimal and focused?
 - No unrelated refactoring?
+- Return this as `component_scores.scope_minimality`.
 
-Step 3 - Test Coverage (weight: 0.2)
+Step 3 - Test Coverage
 - Are new/modified tests included?
 - Do they cover the fix and relevant edge cases?
+- Return this as `component_scores.test_coverage`.
 
-Step 4 - Code Quality (weight: 0.2)
+Step 4 - Code Quality
 - Style matches PyTorch conventions?
 - No regressions introduced?
 - Treat `lintrunner -m origin/main` output as part of the evidence when present.
+- Return this as `component_scores.code_quality`.
 
 ## Scoring Logic
 
 - If `repro_fidelity == "unfaithful"`: `score = 0.0`, `verdict = "needs_revision"`.
-- Otherwise score is the weighted average of Steps 1-4.
-- If `score >= {approval_threshold}`: `verdict = "approved"`.
-- If `iteration >= max_iterations` and `score < {shelve_threshold}`: `verdict = "shelve"`.
+- Otherwise provide all four `component_scores`; `score` should be the lowest
+  component score.
+- The evaluator implementation recomputes `score` from `component_scores`, so
+  make the component scores the source of truth.
+- If every component score is >= {approval_threshold}: `verdict = "approved"`.
+- If `iteration >= max_iterations` and the weakest component score is < {shelve_threshold}: `verdict = "shelve"`.
 - Else: `verdict = "needs_revision"`.
 
 ## Evaluation Context

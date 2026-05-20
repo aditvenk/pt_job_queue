@@ -425,9 +425,15 @@ def test_review_snapshot_includes_reviewer_scores_and_blocking_comments():
     text = _format_review_snapshot(
         ReviewResult(
             verdict="needs_revision",
-            score=0.74,
+            score=0.6,
             iteration=1,
             repro_fidelity="faithful",
+            component_scores={
+                "fix_correctness": 0.7,
+                "scope_minimality": 0.9,
+                "test_coverage": 0.6,
+                "code_quality": 0.8,
+            },
             comments=[
                 ReviewComment(
                     file="test/foo.py",
@@ -440,13 +446,30 @@ def test_review_snapshot_includes_reviewer_scores_and_blocking_comments():
             summary="Not ready yet.",
             reviewer="aggregate",
             reviewer_results=[
-                {"reviewer": "gpt-5.5", "verdict": "needs_revision", "score": 0.74},
+                {
+                    "reviewer": "gpt-5.5",
+                    "verdict": "needs_revision",
+                    "score": 0.6,
+                    "component_scores": {
+                        "fix_correctness": 0.7,
+                        "scope_minimality": 0.9,
+                        "test_coverage": 0.6,
+                        "code_quality": 0.8,
+                    },
+                },
                 {"reviewer": "claude-opus-4-7", "verdict": "approved", "score": 0.85},
             ],
         )
     )
-    assert "evaluator review: needs_revision score=0.74 repro=faithful" in text
-    assert "gpt-5.5: needs_revision score=0.74" in text
+    assert "evaluator review: needs_revision score=0.60 repro=faithful" in text
+    assert (
+        "component lows: correctness=0.70, scope=0.90, tests=0.60, quality=0.80"
+        in text
+    )
+    assert (
+        "gpt-5.5: needs_revision score=0.60 "
+        "(correctness=0.70, scope=0.90, tests=0.60, quality=0.80)"
+    ) in text
     assert "claude-opus-4-7: approved score=0.85" in text
     assert "[gpt-5.5] test/foo.py:12: Add the missing regression test." in text
 

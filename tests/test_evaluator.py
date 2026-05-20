@@ -88,6 +88,52 @@ def test_unfaithful_repro_forces_zero_score():
     assert result.score == 0.0
 
 
+def test_component_scores_are_source_of_truth():
+    class ComponentEvaluator(FakeEvaluator):
+        def _call_llm(self, prompt: str, model_name: str | None = None) -> str:
+            return json.dumps(
+                {
+                    "verdict": "approved",
+                    "score": 1.0,
+                    "component_scores": {
+                        "fix_correctness": 0.7,
+                        "scope_minimality": 0.9,
+                        "test_coverage": 0.6,
+                        "code_quality": 0.8,
+                    },
+                    "iteration": 1,
+                    "repro_fidelity": "faithful",
+                    "comments": [],
+                    "summary": "Top-level score should be ignored.",
+                }
+            )
+
+    result = ComponentEvaluator(
+        reviewer_models=["fake-reviewer"],
+        approval_threshold=0.8,
+    ).evaluate(
+        SolverOutput(
+            issue_number=174923,
+            issue_body="expected RuntimeError",
+            iteration=1,
+            report_md="",
+            fix_diff="",
+            repro_script="import torch",
+            repro_filename="repro_174923_generated.py",
+        )
+    )
+    assert result.verdict == "needs_revision"
+    assert round(result.score, 2) == 0.6
+    assert result.component_scores == {
+        "fix_correctness": 0.7,
+        "scope_minimality": 0.9,
+        "test_coverage": 0.6,
+        "code_quality": 0.8,
+    }
+    assert result.reviewer_results[0]["component_scores"] == result.component_scores
+    assert round(result.reviewer_results[0]["score"], 2) == 0.6
+
+
 def test_all_reviewers_must_approve():
     class SplitEvaluator(FakeEvaluator):
         def _call_llm(self, prompt: str, model_name: str | None = None) -> str:

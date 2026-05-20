@@ -12,7 +12,7 @@ from ptq.application.job_service import get_status
 from ptq.agents import get_agent
 from ptq.domain.models import JobStatus, RunRequest
 from ptq.evaluator import Evaluator, SolverOutput
-from ptq.evaluator.models import ReviewResult
+from ptq.evaluator.models import COMPONENT_SCORE_KEYS, ReviewResult
 from ptq.infrastructure.backends import backend_for_job, create_backend
 from ptq.infrastructure.job_repository import JobRepository
 from ptq.orchestrator.issue_selector import IssueSelector
@@ -786,6 +786,9 @@ def _format_review_snapshot(review: ReviewResult) -> str:
         f"{review.verdict} score={review.score:.2f} "
         f"repro={review.repro_fidelity}"
     ]
+    aggregate_components = _format_component_scores(review.component_scores)
+    if aggregate_components:
+        lines.append(f"  component lows: {aggregate_components}")
     for reviewer in review.reviewer_results:
         reviewer_name = reviewer.get("reviewer", "reviewer")
         verdict = reviewer.get("verdict", "")
@@ -794,7 +797,9 @@ def _format_review_snapshot(review: ReviewResult) -> str:
             score_text = f"{float(score):.2f}"
         except (TypeError, ValueError):
             score_text = str(score)
-        lines.append(f"  - {reviewer_name}: {verdict} score={score_text}")
+        component_text = _format_component_scores(reviewer.get("component_scores"))
+        suffix = f" ({component_text})" if component_text else ""
+        lines.append(f"  - {reviewer_name}: {verdict} score={score_text}{suffix}")
 
     blocking = [comment for comment in review.comments if comment.severity == "blocking"]
     if blocking:
@@ -811,6 +816,27 @@ def _format_review_snapshot(review: ReviewResult) -> str:
     if review.summary:
         lines.append(f"  summary: {_one_line(review.summary, 500)}")
     return "\n".join(lines)
+
+
+def _format_component_scores(component_scores: object) -> str:
+    if not isinstance(component_scores, dict):
+        return ""
+    labels = {
+        "fix_correctness": "correctness",
+        "scope_minimality": "scope",
+        "test_coverage": "tests",
+        "code_quality": "quality",
+    }
+    parts = []
+    for key in COMPONENT_SCORE_KEYS:
+        value = component_scores.get(key)
+        if value is None:
+            return ""
+        try:
+            parts.append(f"{labels[key]}={float(value):.2f}")
+        except (TypeError, ValueError):
+            return ""
+    return ", ".join(parts)
 
 
 def _combined_review_feedback(

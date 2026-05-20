@@ -7,6 +7,13 @@ ReviewVerdict = Literal["approved", "needs_revision", "shelve"]
 ReviewSeverity = Literal["blocking", "suggestion", "nit"]
 ReproFidelity = Literal["faithful", "unfaithful", "uncertain", "from_issue"]
 
+COMPONENT_SCORE_KEYS = (
+    "fix_correctness",
+    "scope_minimality",
+    "test_coverage",
+    "code_quality",
+)
+
 
 @dataclass
 class ReviewComment:
@@ -46,6 +53,7 @@ class ReviewResult:
     score: float
     iteration: int
     repro_fidelity: ReproFidelity
+    component_scores: dict[str, float] = field(default_factory=dict)
     comments: list[ReviewComment] = field(default_factory=list)
     summary: str = ""
     reviewer: str = ""
@@ -57,6 +65,7 @@ class ReviewResult:
             "score": self.score,
             "iteration": self.iteration,
             "repro_fidelity": self.repro_fidelity,
+            "component_scores": self.component_scores,
             "comments": [comment.to_dict() for comment in self.comments],
             "summary": self.summary,
             "reviewer": self.reviewer,
@@ -73,12 +82,15 @@ class ReviewResult:
         if repro_fidelity not in {"faithful", "unfaithful", "uncertain", "from_issue"}:
             repro_fidelity = "uncertain"
 
+        component_scores = _parse_component_scores(data)
         raw_score = data.get("score", 0.0)
         try:
             score = float(raw_score)
         except (TypeError, ValueError):
             score = 0.0
         score = max(0.0, min(1.0, score))
+        if component_scores:
+            score = _weakest_component_score(component_scores)
 
         comments_data = data.get("comments", [])
         comments = [
@@ -91,6 +103,7 @@ class ReviewResult:
             score=score,
             iteration=int(data.get("iteration") or iteration),
             repro_fidelity=repro_fidelity,  # type: ignore[arg-type]
+            component_scores=component_scores,
             comments=comments,
             summary=str(data.get("summary") or ""),
             reviewer=str(data.get("reviewer") or ""),
@@ -121,3 +134,25 @@ class ReviewerSpec:
             profile_path=str(path),
             profile_text=path.read_text(),
         )
+
+
+def _parse_component_scores(data: dict) -> dict[str, float]:
+    raw = data.get("component_scores")
+    if not isinstance(raw, dict):
+        raw = {}
+    parsed: dict[str, float] = {}
+    for key in COMPONENT_SCORE_KEYS:
+        value = raw.get(key, data.get(f"{key}_score"))
+        if value is None:
+            continue
+        try:
+            parsed[key] = max(0.0, min(1.0, float(value)))
+        except (TypeError, ValueError):
+            continue
+    if len(parsed) != len(COMPONENT_SCORE_KEYS):
+        return {}
+    return parsed
+
+
+def _weakest_component_score(component_scores: dict[str, float]) -> float:
+    return min(component_scores[key] for key in COMPONENT_SCORE_KEYS)
