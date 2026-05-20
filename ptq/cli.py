@@ -1003,6 +1003,99 @@ def _profile_should_be_generated(profile: str, path: Path) -> bool:
     return raw.suffix != ".md" and not raw.is_absolute() and len(raw.parts) == 1
 
 
+def _persist_additional_evaluator(
+    *,
+    name: str,
+    profile: str | None,
+    agent: str | None,
+    github_repo: str,
+) -> None:
+    if not profile:
+        raise typer.BadParameter("--add-evaluator requires --profile.")
+    from ptq.config import ensure_additional_evaluator
+    from ptq.evaluator.reviewer_profile import (
+        DEFAULT_PROFILE_MODEL,
+        generate_reviewer_profile,
+        reviewer_profile_path,
+    )
+
+    model = agent or DEFAULT_PROFILE_MODEL
+    profile_path = reviewer_profile_path(profile)
+    if _profile_should_be_generated(profile, profile_path):
+        console.print(
+            f"[dim]orchestrate:[/dim] generating evaluator profile "
+            f"@{profile} -> {profile_path}",
+            soft_wrap=True,
+        )
+        generate_reviewer_profile(profile, repo=github_repo)
+    changed = ensure_additional_evaluator(
+        name=name,
+        profile=profile,
+        model=model,
+    )
+    if changed:
+        console.print(
+            f"[dim]orchestrate:[/dim] saved evaluator "
+            f"{name} to ~/.ptq/config.toml",
+            soft_wrap=True,
+        )
+    else:
+        console.print(
+            f"[dim]orchestrate:[/dim] evaluator {name} already configured",
+            soft_wrap=True,
+        )
+
+
+def _validate_add_evaluator_only(
+    *,
+    prompt: str | None,
+    parallel: int | None,
+    machine: str | None,
+    max_iterations: int | None,
+    issue: int | None,
+    message: str | None,
+    dry_run: bool,
+    follow: bool,
+    poll_seconds: float,
+    push_pr: bool,
+    watch_pr: bool,
+    watch_pr_interval_seconds: float | None,
+    watch_pr_idle_hours: float | None,
+) -> None:
+    conflicts = []
+    if prompt is not None:
+        conflicts.append("--prompt")
+    if parallel is not None:
+        conflicts.append("--parallel")
+    if machine is not None:
+        conflicts.append("--machine")
+    if max_iterations is not None:
+        conflicts.append("--max-iterations")
+    if issue is not None:
+        conflicts.append("--issue")
+    if message is not None:
+        conflicts.append("--message")
+    if dry_run:
+        conflicts.append("--dry-run")
+    if not follow:
+        conflicts.append("--no-follow")
+    if poll_seconds != 5.0:
+        conflicts.append("--poll-seconds")
+    if push_pr:
+        conflicts.append("--pr")
+    if watch_pr:
+        conflicts.append("--watch-pr")
+    if watch_pr_interval_seconds is not None:
+        conflicts.append("--watch-pr-interval-seconds")
+    if watch_pr_idle_hours is not None:
+        conflicts.append("--watch-pr-idle-hours")
+    if conflicts:
+        joined = ", ".join(conflicts)
+        raise typer.BadParameter(
+            f"--add-evaluator only adds an evaluator; remove: {joined}"
+        )
+
+
 def _orchestrate_report_display(job_id: str | None) -> str | None:
     if not job_id:
         return None
@@ -1141,7 +1234,10 @@ def orchestrate(
         str | None,
         typer.Option(
             "--add-evaluator",
-            help="Add a profile-backed evaluator reviewer name.",
+            help=(
+                "Generate/persist a profile-backed evaluator reviewer, then exit. "
+                "Do not combine with issue-solving options."
+            ),
         ),
     ] = None,
     evaluator_profile: Annotated[
@@ -1188,6 +1284,30 @@ def orchestrate(
         if repo is not None or configured_repo
         else configured_github_repo or profile.github_repo
     )
+    if add_evaluator:
+        _validate_add_evaluator_only(
+            prompt=prompt,
+            parallel=parallel,
+            machine=machine,
+            max_iterations=max_iterations,
+            issue=issue,
+            message=message,
+            dry_run=dry_run,
+            follow=follow,
+            poll_seconds=poll_seconds,
+            push_pr=push_pr,
+            watch_pr=watch_pr,
+            watch_pr_interval_seconds=watch_pr_interval_seconds,
+            watch_pr_idle_hours=watch_pr_idle_hours,
+        )
+        _persist_additional_evaluator(
+            name=add_evaluator,
+            profile=evaluator_profile,
+            agent=evaluator_agent,
+            github_repo=github_repo,
+        )
+        return
+
     issue_prompt = (
         f"https://github.com/{github_repo}/issues/{issue}"
         if issue is not None

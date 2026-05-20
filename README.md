@@ -153,7 +153,6 @@ another required evaluator:
 
 ```bash
 uv run ptq orchestrate \
-  --issue 166156 \
   --add-evaluator aditvenk-style \
   --profile aditvenk \
   --agent gpt-5.5

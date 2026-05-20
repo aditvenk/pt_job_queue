@@ -582,16 +582,15 @@ def test_orchestrate_watch_pr_implies_pr_and_sets_watch_knobs():
 
 
 def test_orchestrate_adds_profile_backed_evaluator(tmp_path):
-    captured = {}
     profile_path = tmp_path / "aditvenk.md"
 
     class FakeEvaluator:
         def __init__(self, **kwargs):
-            captured["evaluator_kwargs"] = kwargs
+            raise AssertionError("add-evaluator must not construct Evaluator")
 
     class FakeOrchestrator:
         def __init__(self, config, **kwargs):
-            pass
+            raise AssertionError("add-evaluator must not launch Orchestrator")
 
         async def run(self):
             return []
@@ -613,8 +612,6 @@ def test_orchestrate_adds_profile_backed_evaluator(tmp_path):
             app,
             [
                 "orchestrate",
-                "--issue",
-                "123",
                 "--add-evaluator",
                 "aditvenk-style",
                 "--profile",
@@ -631,12 +628,39 @@ def test_orchestrate_adds_profile_backed_evaluator(tmp_path):
         profile="aditvenk",
         model="gpt-5.5",
     )
-    specs = captured["evaluator_kwargs"]["additional_reviewers"]
-    assert len(specs) == 1
-    assert specs[0].name == "aditvenk-style"
-    assert specs[0].model == "gpt-5.5"
-    assert specs[0].profile_path == str(profile_path)
     assert "saved evaluator aditvenk-style" in result.output
+
+
+def test_orchestrate_add_evaluator_rejects_issue_option(tmp_path):
+    profile_path = tmp_path / "aditvenk.md"
+
+    with (
+        patch("ptq.config.load_config", return_value=_fake_orchestrate_config()),
+        patch(
+            "ptq.evaluator.reviewer_profile.reviewer_profile_path",
+            return_value=profile_path,
+        ),
+        patch("ptq.evaluator.reviewer_profile.generate_reviewer_profile") as generate,
+        patch("ptq.config.ensure_additional_evaluator") as persist,
+    ):
+        result = runner.invoke(
+            app,
+            [
+                "orchestrate",
+                "--issue",
+                "123",
+                "--add-evaluator",
+                "aditvenk-style",
+                "--profile",
+                "aditvenk",
+            ],
+        )
+
+    assert result.exit_code != 0
+    assert "--add-evaluator only adds an evaluator" in result.output
+    assert "--issue" in result.output
+    generate.assert_not_called()
+    persist.assert_not_called()
 
 
 def test_orchestrate_repo_flag_selects_supported_repo_profile():
