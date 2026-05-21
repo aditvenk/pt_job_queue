@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import logging
 import tempfile
 import time
@@ -13,7 +14,12 @@ from ptq.agent import (
 )
 from ptq.agents import RunContext, get_agent
 from ptq.application.job_context import write_job_context
-from ptq.application.venv_service import ProgressCallback, _noop_progress, _setup_job_venv
+from ptq.application.venv_service import (
+    ProgressCallback,
+    _noop_progress,
+    _setup_job_venv,
+    rewrite_torch_editable_to_worktree,
+)
 from ptq.domain.models import JobRecord, PtqError, RunRequest
 from ptq.domain.policies import make_job_id
 from ptq.infrastructure.job_repository import JobRepository
@@ -41,6 +47,46 @@ def _validate_workspace(
         raise PtqError(
             f"Workspace broken: {workspace}/{profile.dir_name}/.git missing. Re-run: ptq setup"
         )
+
+
+def _ensure_pytorch_support_worktree(
+    backend: Backend,
+    workspace: str,
+    job_dir: str,
+    *,
+    verbose: bool = False,
+    progress: ProgressCallback = _noop_progress,
+) -> str | None:
+    """Create an isolated PyTorch worktree for add-on repo jobs.
+
+    TorchTitan issues often bottom out in PyTorch distributed/DTensor code.
+    Agents may edit PyTorch when the root cause is there, but those edits must
+    stay inside the PTQ job directory so they are isolated and diffable.
+    """
+    pytorch_path = f"{job_dir}/pytorch"
+    exists = backend.run(
+        f"test -d {pytorch_path}/.git || test -f {pytorch_path}/.git",
+        check=False,
+    )
+    if exists.returncode == 0:
+        return pytorch_path
+
+    base = backend.run(f"test -d {workspace}/pytorch/.git", check=False)
+    if base.returncode != 0:
+        raise PtqError(
+            f"Workspace broken: {workspace}/pytorch/.git missing. "
+            "Re-run: ptq setup --extras torchtitan"
+        )
+
+    progress("Creating PyTorch support worktree...")
+    with _timed("pytorch worktree creation", progress):
+        backend.run(
+            f"cd {workspace}/pytorch && "
+            f"{workspace}/.venv/bin/python tools/create_worktree.py create pytorch "
+            f"--parent-dir {job_dir} --commit HEAD",
+            stream=verbose,
+        )
+    return pytorch_path
 
 
 def _stamp_worklog_header(
@@ -230,6 +276,14 @@ def launch(
                         f"git worktree add -b {branch} {worktree_path} HEAD",
                         stream=request.verbose,
                     )
+        if repo_name != "pytorch":
+            _ensure_pytorch_support_worktree(
+                backend,
+                workspace,
+                job_dir,
+                verbose=request.verbose,
+                progress=progress,
+            )
         if venv_exists.returncode != 0:
             progress("Creating per-job venv...")
             from ptq.config import load_config
@@ -242,6 +296,22 @@ def launch(
                 progress=progress,
                 build_env_prefix=load_config().build_env_prefix(),
                 repo=repo_name,
+            )
+
+    if repo_name != "pytorch":
+        pytorch_support_worktree = _ensure_pytorch_support_worktree(
+            backend,
+            workspace,
+            job_dir,
+            verbose=request.verbose,
+            progress=progress,
+        )
+        if pytorch_support_worktree:
+            rewrite_torch_editable_to_worktree(
+                backend,
+                job_dir,
+                pytorch_support_worktree,
+                progress=progress,
             )
 
     write_job_context(
@@ -346,36 +416,134 @@ def finalize_run(backend: Backend, job_id: str, job: JobRecord) -> None:
     log_file = f"{job_dir}/{agent.log_filename(run_number)}"
 
     worklog_result = backend.run(f"cat {job_dir}/worklog.md", check=False)
-    if worklog_result.returncode != 0:
-        return
 
     run_header = f"## Run {run_number}"
-    worklog_text = worklog_result.stdout
+    worklog_text = worklog_result.stdout if worklog_result.returncode == 0 else ""
     header_pos = worklog_text.rfind(run_header)
-    if header_pos == -1:
-        return
-
-    next_header = worklog_text.find("\n## Run ", header_pos + len(run_header))
-    section = (
-        worklog_text[header_pos:next_header]
-        if next_header != -1
-        else worklog_text[header_pos:]
-    )
-
-    for line in section.splitlines()[1:]:
-        stripped = line.strip()
-        if stripped and not stripped.startswith("> **User:**"):
-            return
+    section = ""
+    if header_pos != -1:
+        next_header = worklog_text.find("\n## Run ", header_pos + len(run_header))
+        section = (
+            worklog_text[header_pos:next_header]
+            if next_header != -1
+            else worklog_text[header_pos:]
+        )
 
     log_result = backend.run(f"cat {log_file}", check=False)
-    if log_result.returncode != 0 or not log_result.stdout.strip():
-        return
+    log_text = log_result.stdout if log_result.returncode == 0 else ""
 
-    summary = agent.extract_summary(log_result.stdout)
-    if not summary:
-        return
+    if section:
+        has_content = False
+        for line in section.splitlines()[1:]:
+            stripped = line.strip()
+            if stripped and not stripped.startswith("> **User:**"):
+                has_content = True
+                break
+        if not has_content and log_text.strip():
+            summary = agent.extract_summary(log_text)
+            if summary:
+                entry_text = f"\n### Agent Summary (auto-extracted)\n{summary}\n"
+                backend.run(
+                    f"cat >> {job_dir}/worklog.md << 'WORKLOG_AUTO_EOF'\n{entry_text}\nWORKLOG_AUTO_EOF"
+                )
+                section += entry_text
 
-    entry_text = f"\n### Agent Summary (auto-extracted)\n{summary}\n"
-    backend.run(
-        f"cat >> {job_dir}/worklog.md << 'WORKLOG_AUTO_EOF'\n{entry_text}\nWORKLOG_AUTO_EOF"
+    _ensure_report_artifact(
+        backend,
+        job_id=job_id,
+        job_dir=job_dir,
+        run_number=run_number,
+        section=section,
+        log_text=log_text,
     )
+
+
+def _ensure_report_artifact(
+    backend: Backend,
+    *,
+    job_id: str,
+    job_dir: str,
+    run_number: int,
+    section: str,
+    log_text: str,
+) -> None:
+    if backend.run(f"test -s {job_dir}/report.md", check=False).returncode == 0:
+        return
+
+    terminal = _terminal_reason_from_log(log_text)
+    summary = _fallback_summary_from_log(log_text)
+    if not section.strip():
+        section = "(No worklog entries were written before the agent stopped.)"
+    if not summary:
+        summary = "(No assistant summary could be extracted from the agent log.)"
+    terminal_text = terminal or "unknown"
+    report = f"""# PTQ Fallback Report
+
+The solver stopped before writing `report.md`. PTQ generated this fallback
+report from the worklog and agent log so the run still has an inspectable
+artifact.
+
+- Job: `{job_id}`
+- Run: {run_number}
+- Solver terminal reason: {terminal_text}
+
+## Last Worklog Section
+
+```markdown
+{section.strip()}
+```
+
+## Agent Log Summary
+
+{summary}
+"""
+    backend.run(
+        f"cat > {job_dir}/report.md << 'PTQ_FALLBACK_REPORT_EOF'\n"
+        f"{report}\n"
+        f"PTQ_FALLBACK_REPORT_EOF"
+    )
+
+
+def _terminal_reason_from_log(log_text: str) -> str:
+    for line in reversed(log_text.splitlines()):
+        if '"type":"result"' not in line and '"type": "result"' not in line:
+            continue
+        try:
+            payload = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        subtype = str(payload.get("subtype") or "")
+        terminal_reason = str(payload.get("terminal_reason") or "")
+        errors = payload.get("errors")
+        error_text = ""
+        if isinstance(errors, list) and errors:
+            error_text = "; ".join(str(error) for error in errors[:2])
+        return " / ".join(
+            part for part in (subtype, terminal_reason, error_text) if part
+        )
+    return ""
+
+
+def _fallback_summary_from_log(log_text: str) -> str:
+    if not log_text.strip():
+        return ""
+    try:
+        for line in reversed(log_text.splitlines()):
+            data = json.loads(line)
+            message = data.get("message", {})
+            if not isinstance(message, dict) or message.get("role") != "assistant":
+                continue
+            content = message.get("content", [])
+            if not isinstance(content, list):
+                continue
+            texts = [
+                item.get("text", "")
+                for item in content
+                if isinstance(item, dict) and item.get("type") == "text"
+            ]
+            text = "\n".join(texts).strip()
+            if text:
+                return text
+    except (json.JSONDecodeError, TypeError):
+        pass
+    return ""

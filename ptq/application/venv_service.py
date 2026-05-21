@@ -34,6 +34,55 @@ def _chain_result(
     return next_step()
 
 
+def _last_line(backend: Backend, cmd: str) -> str:
+    lines = backend.run(cmd, check=False).stdout.strip().splitlines()
+    return lines[-1] if lines else ""
+
+
+def rewrite_torch_editable_to_worktree(
+    backend: Backend,
+    job_dir: str,
+    pytorch_worktree: str,
+    *,
+    progress: ProgressCallback = _noop_progress,
+) -> None:
+    """Point a cloned job venv's torch editable install at a job worktree."""
+    job_python = f"{job_dir}/.venv/bin/python"
+    if backend.run(f"test -x {job_python}", check=False).returncode != 0:
+        return
+    if (
+        backend.run(
+            f"test -d {pytorch_worktree}/.git || test -f {pytorch_worktree}/.git",
+            check=False,
+        ).returncode
+        != 0
+    ):
+        return
+
+    workspace = backend.workspace
+    sp_dir = _last_line(
+        backend,
+        f"{job_python} -c 'import sysconfig; print(sysconfig.get_path(\"purelib\"))'",
+    )
+    if not sp_dir:
+        return
+
+    old_src = (
+        _last_line(backend, f"realpath {workspace}/pytorch") or f"{workspace}/pytorch"
+    )
+    new_src = _last_line(backend, f"realpath {pytorch_worktree}") or pytorch_worktree
+
+    progress("Rewriting torch editable paths to job PyTorch worktree...")
+    backend.run(
+        f"for f in {sp_dir}/__editable__*torch* "
+        f"{sp_dir}/torch*.dist-info/direct_url.json {sp_dir}/*.pth; do "
+        f'[ -f "$f" ] && sed -i -e "s|{workspace}/pytorch|{pytorch_worktree}|g" '
+        f'-e "s|{old_src}|{new_src}|g" "$f"; done',
+        check=False,
+    )
+    backend.run(f"rm -f {sp_dir}/__pycache__/__editable__*torch*.pyc", check=False)
+
+
 def _setup_lightweight_venv(
     backend: Backend,
     job_dir: str,
@@ -71,11 +120,7 @@ def _setup_lightweight_venv(
 
     job_venv = f"{job_dir}/.venv"
 
-    def _last_line(cmd: str) -> str:
-        lines = backend.run(cmd, check=False).stdout.strip().splitlines()
-        return lines[-1] if lines else ""
-
-    resolved_venv = _last_line(f"realpath {job_venv}") or job_venv
+    resolved_venv = _last_line(backend, f"realpath {job_venv}") or job_venv
     backend.run(
         f'sed -i "s|{base_venv}|{resolved_venv}|g" {job_venv}/bin/activate {job_venv}/bin/activate.csh {job_venv}/bin/activate.fish {job_venv}/bin/activate.nu 2>/dev/null',
         check=False,
@@ -87,6 +132,13 @@ def _setup_lightweight_venv(
     backend.run(
         f'sed -i "1s|#!{base_venv}/bin/python[0-9.]*|#!{resolved_venv}/bin/python|" {job_venv}/bin/* 2>/dev/null',
         check=False,
+    )
+    support_pytorch = f"{job_dir}/pytorch"
+    rewrite_torch_editable_to_worktree(
+        backend,
+        job_dir,
+        support_pytorch,
+        progress=progress,
     )
 
     progress(f"Editable install ({profile.name})...")
@@ -122,13 +174,9 @@ def _try_clone_base_venv(
     workspace = backend.workspace
     base_venv = f"{workspace}/.venv"
 
-    def _last_line(cmd: str) -> str:
-        lines = backend.run(cmd, check=False).stdout.strip().splitlines()
-        return lines[-1] if lines else ""
-
     with _timed("path resolution", progress):
-        old_src = _last_line(f"realpath {workspace}/pytorch")
-        new_src = _last_line(f"realpath {worktree_path}")
+        old_src = _last_line(backend, f"realpath {workspace}/pytorch")
+        new_src = _last_line(backend, f"realpath {worktree_path}")
     if not old_src or not new_src or old_src == new_src:
         log.info("fast-path skipped: path resolution failed or same path")
         return False
@@ -144,9 +192,10 @@ def _try_clone_base_venv(
 
     with _timed("base torch/source match", progress):
         base_torch_git = _last_line(
+            backend,
             f"cd /tmp && {base_venv}/bin/python -c 'import torch; print(torch.version.git_version or \"\")' 2>/dev/null"
         )
-        base_source_git = _last_line(f"cd {old_src} && git rev-parse HEAD")
+        base_source_git = _last_line(backend, f"cd {old_src} && git rev-parse HEAD")
     if not base_torch_git or base_torch_git != base_source_git:
         log.info(
             "fast-path skipped: base torch git %s != source git %s",
@@ -199,6 +248,7 @@ def _try_clone_base_venv(
 
     job_python = f"{job_dir}/.venv/bin/python"
     sp_dir = _last_line(
+        backend,
         f"{job_python} -c 'import sysconfig; print(sysconfig.get_path(\"purelib\"))'"
     )
     if not sp_dir:
@@ -208,7 +258,7 @@ def _try_clone_base_venv(
     progress("Rewriting venv paths...")
     with _timed("path rewrite", progress):
         job_venv = f"{job_dir}/.venv"
-        resolved_venv = _last_line(f"realpath {job_venv}") or job_venv
+        resolved_venv = _last_line(backend, f"realpath {job_venv}") or job_venv
         backend.run(
             f'sed -i "s|{base_venv}|{resolved_venv}|g" {job_venv}/bin/activate {job_venv}/bin/activate.csh {job_venv}/bin/activate.fish {job_venv}/bin/activate.nu 2>/dev/null',
             check=False,

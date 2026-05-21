@@ -14,8 +14,20 @@ def render_job_context(
     profile = get_profile(repo)
     job_dir = f"{workspace}/jobs/{job_id}"
     worktree_path = f"{job_dir}/{profile.dir_name}"
+    pytorch_worktree_path = f"{job_dir}/pytorch"
     venv_path = f"{job_dir}/.venv"
     title = name or job_id
+    extra_paths = ""
+    extra_rules = ""
+    if repo != "pytorch":
+        extra_paths = f"- PyTorch support worktree: `{pytorch_worktree_path}`\n"
+        extra_rules = (
+            f"- If the root cause is in PyTorch, edit `{pytorch_worktree_path}`. "
+            f"Do not edit `{workspace}/pytorch` or another PyTorch checkout.\n"
+        )
+        rebuild_path = pytorch_worktree_path
+    else:
+        rebuild_path = worktree_path
 
     return f"""# PTQ Job Context
 
@@ -26,7 +38,7 @@ This directory is a PTQ-managed job home for `{title}`.
 - Job ID: `{job_id}`
 - Job directory: `{job_dir}`
 - Source worktree: `{worktree_path}`
-- Python/venv: `{venv_path}/bin/python`
+{extra_paths}- Python/venv: `{venv_path}/bin/python`
 - Artifacts: `{job_dir}`
 
 ## Enter the PTQ job home
@@ -35,17 +47,17 @@ This directory is a PTQ-managed job home for `{title}`.
 cd {job_dir} && source .venv/bin/activate
 ```
 
-The PyTorch source worktree is in `pytorch/` from there.
+The job source worktrees are under this directory.
 
 ## Source and environment rules
 
 - Edit source in `{worktree_path}`.
-- Use `{venv_path}/bin/python` for Python commands.
+{extra_rules}- Use `{venv_path}/bin/python` for Python commands.
 - Write scratch files and reports under `{job_dir}` or `{worktree_path}/agent_space`.
 - For PyTorch C++ changes, rebuild with:
 
 ```bash
-bash {workspace}/scripts/rebuild.sh {worktree_path}
+bash {workspace}/scripts/rebuild.sh {rebuild_path}
 ```
 
 ## PTQ commands
@@ -101,5 +113,13 @@ def write_job_context(
         f"cp {job_dir}/PTQ_CONTEXT.md {worktree_path}/agent_space/PTQ_CONTEXT.md",
         check=False,
     )
+    if repo != "pytorch":
+        pytorch_worktree_path = f"{job_dir}/pytorch"
+        backend.run(f"mkdir -p {pytorch_worktree_path}/agent_space", check=False)
+        backend.run(
+            f"cp {job_dir}/PTQ_CONTEXT.md "
+            f"{pytorch_worktree_path}/agent_space/PTQ_CONTEXT.md",
+            check=False,
+        )
     backend.run(f"cp {job_dir}/PTQ_CONTEXT.md {job_dir}/AGENTS.md", check=False)
     backend.run(f"cp {job_dir}/PTQ_CONTEXT.md {job_dir}/CLAUDE.md", check=False)

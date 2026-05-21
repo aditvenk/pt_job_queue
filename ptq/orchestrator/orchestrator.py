@@ -671,11 +671,22 @@ class Orchestrator:
         )
         report_md = await self._read_remote_text(backend, f"{job_dir}/report.md")
         fix_diff = await self._read_remote_text(backend, f"{job_dir}/fix.diff")
+        pytorch_fix_diff = await self._read_remote_text(
+            backend, f"{job_dir}/pytorch-fix.diff"
+        )
+        if pytorch_fix_diff.strip():
+            fix_diff = (
+                f"{fix_diff.rstrip()}\n\n"
+                "# PyTorch support worktree diff (pytorch-fix.diff)\n"
+                f"{pytorch_fix_diff}"
+            ).lstrip()
         if not status_json and not report_md.strip() and not fix_diff.strip():
+            terminal_error = await self._last_agent_terminal_error(job, backend, job_dir)
+            detail = f" Solver terminal reason: {terminal_error}." if terminal_error else ""
             raise RuntimeError(
                 f"Solver job {job_id} stopped without status.json, report.md, "
-                "or fix.diff. Inspect the agent log with "
-                f"`uv run ptq peek {job_id} --log 120`."
+                "fix.diff, or pytorch-fix.diff. Inspect the agent log with "
+                f"`uv run ptq peek {job_id} --log 120`.{detail}"
             )
         repro_filename = str(status_json.get("repro_file") or "")
         if not repro_filename:
@@ -725,6 +736,37 @@ class Orchestrator:
         if result.returncode != 0:
             return ""
         return result.stdout
+
+    async def _last_agent_terminal_error(self, job, backend, job_dir: str) -> str:
+        try:
+            agent = get_agent(job.agent)
+            log_file = f"{job_dir}/{agent.log_filename(job.runs)}"
+            result = await asyncio.to_thread(
+                backend.run,
+                f"tail -80 {shlex.quote(log_file)}",
+                False,
+            )
+        except Exception:
+            return ""
+        if result.returncode != 0 or not result.stdout:
+            return ""
+        for line in reversed(result.stdout.splitlines()):
+            if '"type":"result"' not in line and '"type": "result"' not in line:
+                continue
+            try:
+                payload = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            subtype = str(payload.get("subtype") or "")
+            terminal_reason = str(payload.get("terminal_reason") or "")
+            errors = payload.get("errors")
+            if isinstance(errors, list) and errors:
+                error_text = "; ".join(str(error) for error in errors[:2])
+            else:
+                error_text = ""
+            parts = [part for part in (subtype, terminal_reason, error_text) if part]
+            return " / ".join(parts)
+        return ""
 
     async def _remote_exists(self, backend, path: str) -> bool:
         result = await asyncio.to_thread(backend.run, f"test -f {path}", False)
