@@ -19,7 +19,10 @@ from ptq.evaluator.models import (
     ReviewerSpec,
 )
 from ptq.evaluator.repro_validator import validate_repro_presence
-from ptq.evaluator.rubric import build_evaluation_prompt
+from ptq.evaluator.rubric import (
+    build_evaluation_prompt,
+    build_pull_request_review_prompt,
+)
 
 _JSON_BLOCK_RE = re.compile(r"```(?:json)?\s*(\{.*?\})\s*```", re.DOTALL)
 
@@ -36,6 +39,19 @@ class SolverOutput:
     repro_filename: str = ""
     status_json: dict = field(default_factory=dict)
     worktree_path: Path | None = None
+
+
+@dataclass
+class PullRequestReviewInput:
+    pr_url: str
+    title: str
+    body: str
+    author: str
+    base_ref: str
+    head_ref: str
+    files: list[dict]
+    diff: str
+    iteration: int = 1
 
 
 @dataclass
@@ -82,6 +98,30 @@ class Evaluator:
         return self._evaluate_reviewers(
             solver_output,
             self._additional_reviewers(),
+        )
+
+    def evaluate_pull_request(self, pr: PullRequestReviewInput) -> ReviewResult:
+        prompt = build_pull_request_review_prompt(
+            pr_url=pr.pr_url,
+            title=pr.title,
+            body=pr.body,
+            author=pr.author,
+            base_ref=pr.base_ref,
+            head_ref=pr.head_ref,
+            files=pr.files,
+            diff=pr.diff,
+            approval_threshold=self.approval_threshold,
+            shelve_threshold=self.shelve_threshold,
+        )
+        reviewer_results = self._evaluate_all_reviewers(
+            self._effective_reviewers(),
+            prompt,
+            iteration=pr.iteration,
+        )
+        return self._aggregate_reviewer_results(
+            reviewer_results,
+            repro_comments=[],
+            iteration=pr.iteration,
         )
 
     def has_additional_reviewers(self) -> bool:

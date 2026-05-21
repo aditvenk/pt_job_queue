@@ -1,4 +1,4 @@
-from ptq.evaluator.evaluator import Evaluator, SolverOutput
+from ptq.evaluator.evaluator import Evaluator, PullRequestReviewInput, SolverOutput
 from ptq.evaluator.models import ReviewComment, ReviewResult, ReviewerSpec
 
 __all__ = [
@@ -6,5 +6,6 @@ __all__ = [
     "ReviewComment",
     "ReviewResult",
     "ReviewerSpec",
+    "PullRequestReviewInput",
     "SolverOutput",
 ]

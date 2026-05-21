@@ -1105,6 +1105,7 @@ def _validate_add_evaluator_only(
     machine: str | None,
     max_iterations: int | None,
     issue: str | None,
+    review: str | None,
     message: str | None,
     dry_run: bool,
     follow: bool,
@@ -1125,6 +1126,8 @@ def _validate_add_evaluator_only(
         conflicts.append("--max-iterations")
     if issue is not None:
         conflicts.append("--issue")
+    if review is not None:
+        conflicts.append("--review")
     if message is not None:
         conflicts.append("--message")
     if dry_run:
@@ -1225,6 +1228,16 @@ def orchestrate(
         str | None,
         typer.Option(
             help="Run the orchestrator on one explicit issue number or GitHub issue URL."
+        ),
+    ] = None,
+    review: Annotated[
+        str | None,
+        typer.Option(
+            "--review",
+            help=(
+                "Review a GitHub PR/review URL with the evaluator panel only; "
+                "skips solver."
+            ),
         ),
     ] = None,
     message: Annotated[
@@ -1345,6 +1358,7 @@ def orchestrate(
             machine=machine,
             max_iterations=max_iterations,
             issue=issue,
+            review=review,
             message=message,
             dry_run=dry_run,
             follow=follow,
@@ -1360,6 +1374,54 @@ def orchestrate(
             agent=evaluator_agent,
             github_repo=github_repo,
         )
+        return
+
+    if review is not None:
+        if issue is not None:
+            raise typer.BadParameter("--review cannot be combined with --issue.")
+        if prompt is not None:
+            raise typer.BadParameter("--review cannot be combined with --prompt.")
+        if message is not None:
+            raise typer.BadParameter("--review cannot be combined with --message.")
+        if dry_run:
+            raise typer.BadParameter("--review cannot be combined with --dry-run.")
+        if push_pr or watch_pr:
+            raise typer.BadParameter("--review cannot be combined with --pr/--watch-pr.")
+
+        from ptq.orchestrator.review import parse_pull_request_url
+        from ptq.orchestrator.review import run_pull_request_review
+
+        pr_ref = parse_pull_request_url(review)
+        evaluator = Evaluator(
+            reviewer_models=_evaluator_models(evaluator_cfg),
+            additional_reviewers=_additional_evaluator_specs(
+                evaluator_cfg,
+                github_repo=pr_ref.github_repo,
+            ),
+            approval_threshold=float(evaluator_cfg.get("approval_threshold", 0.8)),
+            shelve_threshold=float(evaluator_cfg.get("shelve_threshold", 0.3)),
+            max_iterations=int(evaluator_cfg.get("max_iterations", 10)),
+        )
+        try:
+            evaluator.validate_configuration()
+            report = run_pull_request_review(
+                review,
+                evaluator,
+                on_progress=lambda msg: console.print(
+                    f"[dim]orchestrate:[/dim] {msg}"
+                ),
+            )
+        except PtqError as e:
+            _handle_error(e)
+        except RuntimeError as e:
+            console.print(f"[red]{e}[/red]")
+            raise typer.Exit(1) from e
+
+        console.print(
+            f"review {report.review.verdict} score={report.review.score:.2f}"
+        )
+        console.print(f"  PR: {report.pr.url}", soft_wrap=True)
+        console.print(f"  report.md: {report.report_path}", soft_wrap=True)
         return
 
     issue_number, issue_github_repo = _parse_issue_reference(issue)

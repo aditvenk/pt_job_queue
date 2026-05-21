@@ -149,3 +149,83 @@ scope_minimality and should receive blocking feedback.
 {lint_output}
 ```
 """
+
+
+def build_pull_request_review_prompt(
+    *,
+    pr_url: str,
+    title: str,
+    body: str,
+    author: str,
+    base_ref: str,
+    head_ref: str,
+    files: list[dict],
+    diff: str,
+    approval_threshold: float,
+    shelve_threshold: float,
+) -> str:
+    return f"""\
+You are evaluating a GitHub pull request. Return only valid JSON matching this
+schema:
+
+```json
+{json.dumps(REVIEW_JSON_SCHEMA, indent=2)}
+```
+
+This is a review-only evaluation. There is no solver loop and no repro artifact
+gate. Set `repro_fidelity` to `"uncertain"` unless the PR body or diff contains
+direct repro evidence.
+
+## Review Goals
+
+Review the PR as if you were deciding whether it is ready for human review.
+Focus on actionable findings that should be fixed before merge. For each
+actionable comment, set `file` to the changed file path and `line` to the new
+file line number when possible so PTQ can attach a code snapshot in the report.
+Use `file="general"` and `line=null` only for PR-wide concerns.
+
+## Component Scores
+
+Return all four `component_scores`; `score` should be the lowest component
+score.
+
+- `fix_correctness`: Does the change appear behaviorally correct? Are root
+  causes, edge cases, and compatibility risks handled?
+- `scope_minimality`: Is the diff focused, with no unrelated refactors or
+  gratuitous churn?
+- `test_coverage`: Are tests present and meaningful for the changed behavior?
+- `code_quality`: Does the implementation match repo style and avoid likely
+  regressions?
+
+If every component score is >= {approval_threshold}, return
+`verdict="approved"`. Otherwise return `verdict="needs_revision"` with
+blocking or suggestion comments. Use `verdict="shelve"` only if the PR appears
+fundamentally unsuitable and the weakest component score is below
+{shelve_threshold}.
+
+## Pull Request
+
+- URL: {pr_url}
+- Title: {title}
+- Author: {author or "(unknown)"}
+- Base: {base_ref or "(unknown)"}
+- Head: {head_ref or "(unknown)"}
+
+### PR Body
+
+```markdown
+{body or "(empty)"}
+```
+
+### Changed Files
+
+```json
+{json.dumps(files, indent=2, sort_keys=True)}
+```
+
+### PR Diff
+
+```diff
+{diff}
+```
+"""

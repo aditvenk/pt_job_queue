@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import tempfile
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 from typer.testing import CliRunner
@@ -790,6 +791,61 @@ def test_orchestrate_issue_url_infers_repo_profile():
     )
 
 
+def test_orchestrate_review_runs_evaluator_panel_only():
+    captured = {}
+
+    class FakeEvaluator:
+        def __init__(self, **kwargs):
+            captured["evaluator_kwargs"] = kwargs
+
+        def validate_configuration(self):
+            captured["validated"] = True
+
+    class FakeOrchestrator:
+        def __init__(self, config, **kwargs):
+            raise AssertionError("--review must not launch Orchestrator")
+
+        async def run(self):
+            return []
+
+    def fake_review(url, evaluator, **kwargs):
+        captured["review_url"] = url
+        captured["evaluator"] = evaluator
+        return SimpleNamespace(
+            pr=SimpleNamespace(url="https://github.com/pytorch/pytorch/pull/184746"),
+            review=SimpleNamespace(verdict="needs_revision", score=0.72),
+            report_path=Path("/tmp/ptq-review/report.md"),
+        )
+
+    with (
+        patch("ptq.config.load_config", return_value=_fake_orchestrate_config()),
+        patch("ptq.evaluator.Evaluator", FakeEvaluator),
+        patch("ptq.orchestrator.Orchestrator", FakeOrchestrator),
+        patch("ptq.orchestrator.review.run_pull_request_review", side_effect=fake_review),
+    ):
+        result = runner.invoke(
+            app,
+            [
+                "orchestrate",
+                "--review",
+                "https://github.com/pytorch/pytorch/pull/184746#pullrequestreview-1",
+            ],
+        )
+
+    assert result.exit_code == 0, result.output
+    assert captured["validated"] is True
+    assert (
+        captured["review_url"]
+        == "https://github.com/pytorch/pytorch/pull/184746#pullrequestreview-1"
+    )
+    assert captured["evaluator_kwargs"]["reviewer_models"] == [
+        "gpt-5.5",
+        "claude-opus-4-7",
+    ]
+    assert "review needs_revision score=0.72" in result.output
+    assert "report.md: /tmp/ptq-review/report.md" in result.output
+
+
 def test_orchestrate_message_becomes_initial_solver_guidance():
     captured = {}
 
@@ -987,6 +1043,7 @@ def test_orchestrate_has_no_max_issues_flag():
     assert "--max-issues" not in result.output
     assert "--repo" in result.output
     assert "--watch-pr" in result.output
+    assert "--review" in result.output
     assert "--add-evaluator" in result.output
     assert "generate-review-profile" not in result.output
 
