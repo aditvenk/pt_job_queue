@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import time
 from pathlib import Path
 from typing import Annotated
@@ -18,6 +19,49 @@ app = typer.Typer(
     help="PyTorch Job Queue — dispatch AI agents to fix issues in PyTorch and add-on repos.",
 )
 console = Console()
+
+_GITHUB_ISSUE_URL_RE = re.compile(
+    r"^https?://github\.com/([^/\s]+)/([^/\s]+)/issues/(\d+)(?:[/?#].*)?$",
+    re.IGNORECASE,
+)
+
+
+def _parse_issue_reference(value: int | str | None) -> tuple[int | None, str | None]:
+    if value is None:
+        return None, None
+    if isinstance(value, int):
+        return value, None
+    text = value.strip()
+    if text.isdigit():
+        return int(text), None
+    match = _GITHUB_ISSUE_URL_RE.match(text)
+    if match:
+        owner, repo, number = match.groups()
+        return int(number), f"{owner}/{repo}"
+    raise typer.BadParameter(
+        "--issue must be an issue number or GitHub issue URL like "
+        "https://github.com/pytorch/pytorch/issues/184746"
+    )
+
+
+def _repo_for_issue_url(issue_github_repo: str, explicit_repo: str | None) -> str:
+    from ptq.repo_profiles import get_profile, profile_name_for_github_repo
+
+    inferred_repo = profile_name_for_github_repo(issue_github_repo)
+    if inferred_repo is None:
+        raise typer.BadParameter(
+            f"GitHub repo '{issue_github_repo}' from --issue does not match any "
+            "configured PTQ repo profile. Add it under [repos.<name>] in "
+            "~/.ptq/config.toml first."
+        )
+    if explicit_repo and explicit_repo != inferred_repo:
+        explicit_profile = get_profile(explicit_repo)
+        if profile_name_for_github_repo(explicit_profile.github_repo) != inferred_repo:
+            raise typer.BadParameter(
+                f"--issue points at {issue_github_repo}, but --repo is "
+                f"{explicit_repo} ({explicit_profile.github_repo})."
+            )
+    return inferred_repo
 
 
 def _handle_error(e: PtqError) -> None:
@@ -204,7 +248,10 @@ def run(
     job_id: Annotated[
         str | None, typer.Argument(help="Job ID or issue number to re-run.")
     ] = None,
-    issue: Annotated[int | None, typer.Option(help="GitHub issue number.")] = None,
+    issue: Annotated[
+        str | None,
+        typer.Option(help="GitHub issue number or GitHub issue URL."),
+    ] = None,
     machine: Annotated[
         str | None, typer.Option(help="Remote machine to run on.")
     ] = None,
@@ -256,9 +303,9 @@ def run(
         typer.Option("--name", "-n", help="Display name for this job."),
     ] = None,
     repo: Annotated[
-        str,
+        str | None,
         typer.Option("--repo", help="Repo the issue is filed in (default: pytorch)."),
-    ] = "pytorch",
+    ] = None,
 ) -> None:
     """Launch an AI agent to investigate a GitHub issue or run an adhoc task.
 
@@ -335,20 +382,25 @@ def run(
     thinking = cfg.effective_thinking(agent, thinking)
     max_turns = max_turns or cfg.default_max_turns
 
+    issue_number, issue_github_repo = _parse_issue_reference(issue)
+    if issue_github_repo:
+        repo = _repo_for_issue_url(issue_github_repo, repo)
+    repo = repo or "pytorch"
+
     from ptq.repo_profiles import get_profile
 
     profile = get_profile(repo)
 
     issue_data = None
-    if issue is not None:
-        console.print(f"Fetching {profile.github_repo}#{issue}...")
-        issue_data = fetch_issue(issue, repo=profile.github_repo)
+    if issue_number is not None:
+        console.print(f"Fetching {profile.github_repo}#{issue_number}...")
+        issue_data = fetch_issue(issue_number, repo=profile.github_repo)
         console.print(f"[bold]{issue_data['title']}[/bold]")
 
     backend = create_backend(machine=machine, local=local, workspace=workspace)
     request = RunRequest(
         issue_data=issue_data,
-        issue_number=issue,
+        issue_number=issue_number,
         message=message,
         machine=machine,
         local=local,
@@ -1052,7 +1104,7 @@ def _validate_add_evaluator_only(
     parallel: int | None,
     machine: str | None,
     max_iterations: int | None,
-    issue: int | None,
+    issue: str | None,
     message: str | None,
     dry_run: bool,
     follow: bool,
@@ -1170,8 +1222,10 @@ def orchestrate(
         int | None, typer.Option(help="Maximum hill-climbing iterations per issue.")
     ] = None,
     issue: Annotated[
-        int | None,
-        typer.Option(help="Run the orchestrator on one explicit GitHub issue."),
+        str | None,
+        typer.Option(
+            help="Run the orchestrator on one explicit issue number or GitHub issue URL."
+        ),
     ] = None,
     message: Annotated[
         str | None,
@@ -1308,11 +1362,17 @@ def orchestrate(
         )
         return
 
-    issue_prompt = (
-        f"https://github.com/{github_repo}/issues/{issue}"
-        if issue is not None
-        else prompt or str(orch.get("issue_selection_prompt") or "")
-    )
+    issue_number, issue_github_repo = _parse_issue_reference(issue)
+    if issue_github_repo:
+        repo_name = _repo_for_issue_url(issue_github_repo, repo)
+        profile = get_profile(repo_name)
+        github_repo = profile.github_repo
+
+    issue_prompt = ""
+    if issue_number is not None:
+        issue_prompt = f"https://github.com/{github_repo}/issues/{issue_number}"
+    else:
+        issue_prompt = prompt or str(orch.get("issue_selection_prompt") or "")
     if not issue_prompt:
         raise typer.BadParameter(
             "Provide --prompt or set [orchestrator].issue_selection_prompt."
@@ -1321,7 +1381,7 @@ def orchestrate(
     agent = cfg.default_agent
     model = cfg.effective_model(agent)
     thinking = cfg.effective_thinking(agent)
-    max_issues_value = 1 if issue is not None else int(orch.get("max_issues", 20))
+    max_issues_value = 1 if issue_number is not None else int(orch.get("max_issues", 20))
     parallel_value = int(parallel or orch.get("parallel", 4))
     stream_solver = bool(follow)
     watch_pr_enabled = bool(watch_pr or orch.get("watch_pr", False))

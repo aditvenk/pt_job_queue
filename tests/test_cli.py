@@ -163,6 +163,62 @@ class TestRunValidation:
         request = mock_launch.call_args.args[2]
         assert request.review_feedback_json == '{"verdict": "needs_revision"}'
 
+    def test_issue_url_infers_repo_for_run(self, tmp_path):
+        repo = _make_repo(tmp_path)
+
+        def fake_launch(r, b, req, **kw):
+            repo.save(
+                JobRecord(
+                    job_id="test-job",
+                    issue=req.issue_number,
+                    local=True,
+                    workspace="/tmp/ws",
+                    repo=req.repo,
+                )
+            )
+            return "test-job"
+
+        cfg = type(
+            "Cfg",
+            (),
+            {
+                "default_agent": "claude",
+                "default_max_turns": 100,
+                "effective_model": staticmethod(lambda agent, model=None: "opus"),
+                "effective_thinking": staticmethod(lambda agent, thinking=None: None),
+                "prompt_preset": staticmethod(lambda _x: None),
+                "prompt_preset_choices": staticmethod(lambda: []),
+            },
+        )()
+
+        with (
+            patch("ptq.cli._repo", return_value=repo),
+            patch("ptq.config.load_config", return_value=cfg),
+            patch(
+                "ptq.issue.fetch_issue",
+                return_value={"title": "TorchTitan bug", "body": "", "labels": []},
+            ) as fetch_issue,
+            patch("ptq.infrastructure.backends.create_backend"),
+            patch(
+                "ptq.application.run_service.launch", side_effect=fake_launch
+            ) as mock_launch,
+        ):
+            result = runner.invoke(
+                app,
+                [
+                    "run",
+                    "--issue",
+                    "https://github.com/pytorch/torchtitan/issues/3409",
+                    "--no-follow",
+                ],
+            )
+
+        assert result.exit_code == 0, result.output
+        fetch_issue.assert_called_once_with(3409, repo="pytorch/torchtitan")
+        request = mock_launch.call_args.args[2]
+        assert request.issue_number == 3409
+        assert request.repo == "torchtitan"
+
     def test_thinking_passed_through(self, tmp_path):
         repo = _make_repo(tmp_path)
 
@@ -693,6 +749,44 @@ def test_orchestrate_repo_flag_selects_supported_repo_profile():
     assert (
         captured["config"].issue_selection_prompt
         == "https://github.com/pytorch/torchtitan/issues/123"
+    )
+
+
+def test_orchestrate_issue_url_infers_repo_profile():
+    captured = {}
+
+    class FakeEvaluator:
+        def __init__(self, **kwargs):
+            pass
+
+    class FakeOrchestrator:
+        def __init__(self, config, **kwargs):
+            captured["config"] = config
+
+        async def run(self):
+            return []
+
+    with (
+        patch("ptq.config.load_config", return_value=_fake_orchestrate_config()),
+        patch("ptq.evaluator.Evaluator", FakeEvaluator),
+        patch("ptq.orchestrator.Orchestrator", FakeOrchestrator),
+    ):
+        result = runner.invoke(
+            app,
+            [
+                "orchestrate",
+                "--issue",
+                "https://github.com/pytorch/torchtitan/issues/3409",
+            ],
+        )
+
+    assert result.exit_code == 0, result.output
+    assert captured["config"].repo == "torchtitan"
+    assert captured["config"].github_repo == "pytorch/torchtitan"
+    assert captured["config"].max_issues == 1
+    assert (
+        captured["config"].issue_selection_prompt
+        == "https://github.com/pytorch/torchtitan/issues/3409"
     )
 
 
