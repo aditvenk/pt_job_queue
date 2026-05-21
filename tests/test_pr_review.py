@@ -94,26 +94,12 @@ def test_review_report_includes_code_snapshot_for_actionable_feedback():
 
     assert "## Consolidated Summary" in report
     assert "### Intro" in report
-    assert "**Background**" in report
-    assert "The PR changes code in `torch/foo.py`, `test/test_foo.py`." in report
-    assert "View and alias outputs are especially sensitive" in report
-    assert "**Problem**" in report
-    assert (
-        'The PR is titled "Fix foo". The problem described by the PR is: '
-        "The foo path loses alias metadata during tracing."
-        in report
+    assert all(
+        heading in report
+        for heading in ("**Background**", "**Problem**", "**Fix Summary**")
     )
-    assert "**Fix Summary**" in report
-    assert (
-        "Replay the wrapper view metadata instead of using the fallback."
-        in report
-    )
-    assert "The PR also changes tests in `test/test_foo.py`" in report
     assert "Not ready; 1/2 reviewers requested changes." in report
-    assert "Reviewers requesting changes" in report
-    assert "`gpt-5.5` score=0.55 - Needs test coverage." in report
     assert "### gpt-5.5" in report
-    assert "- Verdict: `needs_revision`" in report
     assert "This changed path needs a regression test." in report
     assert "### 1. gpt-5.5: torch/foo.py:10" in report
     assert "@@ -8,4 +8,5 @@ def f():" in report

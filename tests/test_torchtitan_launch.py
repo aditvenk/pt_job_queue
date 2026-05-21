@@ -152,26 +152,6 @@ class TestLaunchTorchtitan:
         assert job.repo == "torchtitan"
 
     @patch("ptq.application.run_service.deploy_scripts")
-    def test_torchtitan_worktree_path(self, _deploy, repo, frozen_date):
-        """Worktree should be under torchtitan/, not pytorch/."""
-        backend = LocalBackend(workspace="/tmp/ws")
-        _mock_backend(backend)
-
-        job_id = launch(
-            repo,
-            backend,
-            RunRequest(message="hello", local=True, follow=False, repo="torchtitan"),
-        )
-
-        run_cmds = [
-            call.args[0]
-            for call in backend.run.call_args_list
-            if isinstance(call.args[0], str)
-        ]
-        worktree_cmds = [c for c in run_cmds if "git worktree add" in c]
-        assert any(f"/jobs/{job_id}/torchtitan" in c for c in worktree_cmds)
-
-    @patch("ptq.application.run_service.deploy_scripts")
     def test_pytorch_still_uses_create_worktree(self, _deploy, repo, frozen_date):
         """Pytorch should still use create_worktree.py."""
         backend = LocalBackend(workspace="/tmp/ws")

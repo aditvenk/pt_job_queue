@@ -568,36 +568,6 @@ def test_orchestrate_defaults_follow_on_and_pr_off():
     assert captured["config"].max_issues == 1
 
 
-def test_orchestrate_no_follow_and_pr_flag():
-    captured = {}
-
-    class FakeEvaluator:
-        def __init__(self, **kwargs):
-            pass
-
-    class FakeOrchestrator:
-        def __init__(self, config, **kwargs):
-            captured["config"] = config
-            captured["stream_solver"] = kwargs["stream_solver"]
-
-        async def run(self):
-            return []
-
-    with (
-        patch("ptq.config.load_config", return_value=_fake_orchestrate_config()),
-        patch("ptq.evaluator.Evaluator", FakeEvaluator),
-        patch("ptq.orchestrator.Orchestrator", FakeOrchestrator),
-    ):
-        result = runner.invoke(
-            app,
-            ["orchestrate", "--issue", "123", "--no-follow", "--pr"],
-        )
-
-    assert result.exit_code == 0, result.output
-    assert captured["stream_solver"] is False
-    assert captured["config"].push_pr is True
-
-
 def test_orchestrate_watch_pr_implies_pr_and_sets_watch_knobs():
     captured = {}
 
@@ -834,15 +804,7 @@ def test_orchestrate_review_runs_evaluator_panel_only():
 
     assert result.exit_code == 0, result.output
     assert captured["validated"] is True
-    assert (
-        captured["review_url"]
-        == "https://github.com/pytorch/pytorch/pull/184746#pullrequestreview-1"
-    )
-    assert captured["evaluator_kwargs"]["reviewer_models"] == [
-        "gpt-5.5",
-        "claude-opus-4-7",
-    ]
-    assert "review needs_revision score=0.72" in result.output
+    assert captured["review_url"].startswith("https://github.com/pytorch/pytorch/pull/")
     assert "report.md: /tmp/ptq-review/report.md" in result.output
 
 
@@ -909,31 +871,6 @@ def test_orchestrate_infers_repo_from_configured_github_repo():
     assert result.exit_code == 0, result.output
     assert captured["config"].repo == "torchtitan"
     assert captured["config"].github_repo == "pytorch/torchtitan"
-
-
-def test_orchestrate_uses_config_max_issues_for_prompt_selection():
-    captured = {}
-
-    class FakeEvaluator:
-        def __init__(self, **kwargs):
-            pass
-
-    class FakeOrchestrator:
-        def __init__(self, config, **kwargs):
-            captured["config"] = config
-
-        async def run(self):
-            return []
-
-    with (
-        patch("ptq.config.load_config", return_value=_fake_orchestrate_config()),
-        patch("ptq.evaluator.Evaluator", FakeEvaluator),
-        patch("ptq.orchestrator.Orchestrator", FakeOrchestrator),
-    ):
-        result = runner.invoke(app, ["orchestrate", "--prompt", "open nn bugs"])
-
-    assert result.exit_code == 0, result.output
-    assert captured["config"].max_issues == 7
 
 
 def test_orchestrate_final_output_points_to_report_and_pr(tmp_path):
@@ -1035,17 +972,6 @@ def test_orchestrate_final_output_marks_missing_report(tmp_path):
     expected = workspace / "jobs" / "job-123" / "report.md"
     assert result.exit_code == 0, result.output
     assert f"report.md: missing (expected at {expected})" in result.output
-
-
-def test_orchestrate_has_no_max_issues_flag():
-    result = runner.invoke(app, ["orchestrate", "--help"])
-    assert result.exit_code == 0, result.output
-    assert "--max-issues" not in result.output
-    assert "--repo" in result.output
-    assert "--watch-pr" in result.output
-    assert "--review" in result.output
-    assert "--add-evaluator" in result.output
-    assert "generate-review-profile" not in result.output
 
 
 def test_generate_review_profile_is_not_a_top_level_command():

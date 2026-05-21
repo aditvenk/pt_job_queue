@@ -73,6 +73,10 @@ def client(tmp_path, mock_backend):
         patch("ptq.web.deps.backend_for_job", return_value=mock_backend),
         patch("ptq.web.routes.backend_for_job", return_value=mock_backend),
         patch("ptq.web.routes.load_config", return_value=TEST_CONFIG),
+        patch(
+            "ptq.issue.fetch_issue",
+            return_value={"title": "Fake issue", "body": "", "labels": []},
+        ),
     ):
         yield TestClient(create_app())
 

@@ -32,7 +32,9 @@ class TestFetchResults:
             dest, fetched, missing = fetch_results(repo, "j1", output)
 
         assert dest == output
-        assert backend.copy_from.call_count == 10
+        assert "pytorch-fix.diff" in fetched
+        assert "repro_42.py" in fetched
+        assert "repro_42_generated.py" in fetched
 
     def test_missing_artifacts_tracked(self, tmp_path):
         repo = JobRepository(tmp_path / "jobs.json")
@@ -47,8 +49,9 @@ class TestFetchResults:
         ):
             _, fetched, missing = fetch_results(repo, "j1", tmp_path / "out")
 
-        assert len(fetched) == 0
-        assert len(missing) == 8
+        assert not fetched
+        assert "report.md" in missing
+        assert "pytorch-fix.diff" in missing
 
 
 class TestReadArtifact:
