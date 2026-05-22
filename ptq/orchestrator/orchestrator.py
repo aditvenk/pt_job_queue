@@ -445,6 +445,15 @@ class Orchestrator:
             local=self.config.local,
         )
         existing_job_id = self._existing_job_id(issue)
+        if existing_job_id:
+            from ptq.application.pr_service import sync_existing_pr_branch
+
+            await asyncio.to_thread(
+                sync_existing_pr_branch,
+                self.job_repo,
+                existing_job_id,
+                log=lambda msg: self._progress(f"#{issue.number}: pr: {msg}"),
+            )
         review_feedback_json = _combined_review_feedback(review, pr_feedback)
         request = RunRequest(
             issue_data=issue.raw,

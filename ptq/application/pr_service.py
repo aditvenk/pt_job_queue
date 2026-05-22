@@ -692,6 +692,104 @@ def _existing_open_pr_url(
     return url
 
 
+def _sync_remote_pr_branch(
+    backend: Backend,
+    worktree: str,
+    branch: str,
+    _log: Callable[[str], None],
+) -> bool:
+    quoted_branch = shlex.quote(branch)
+    exists = backend.run(
+        f"cd {worktree} && git ls-remote --exit-code --heads origin {quoted_branch}",
+        check=False,
+    )
+    if exists.returncode != 0:
+        return False
+
+    _log(f"Fetching existing PR branch {branch}...")
+    fetch = backend.run(
+        f"cd {worktree} && "
+        "git -c submodule.recurse=false "
+        "-c fetch.recurseSubmodules=false "
+        f"fetch --no-recurse-submodules origin {quoted_branch}",
+        check=False,
+    )
+    if fetch.returncode != 0:
+        detail = (fetch.stderr or fetch.stdout or "").strip()
+        raise PtqError(f"git fetch failed: {detail or 'unknown error'}")
+
+    dirty = backend.run(
+        f"cd {worktree} && git status --porcelain",
+        check=False,
+    ).stdout.strip()
+    stashed = False
+    if dirty:
+        _log("Stashing local solver changes before syncing PR branch...")
+        stash = backend.run(
+            f"cd {worktree} && git stash push -u -m ptq-sync-existing-pr",
+            check=False,
+        )
+        if stash.returncode != 0:
+            detail = (stash.stderr or stash.stdout or "").strip()
+            raise PtqError(f"git stash failed: {detail or 'unknown error'}")
+        stashed = True
+
+    current_branch = backend.run(
+        f"cd {worktree} && git branch --show-current",
+        check=False,
+    ).stdout.strip()
+    if current_branch == branch:
+        _log("Rebasing local PR branch onto the remote PR branch...")
+        sync = backend.run(f"cd {worktree} && git rebase FETCH_HEAD", check=False)
+    else:
+        _log("Checking out existing remote PR branch...")
+        sync = backend.run(
+            f"cd {worktree} && git checkout -B {quoted_branch} FETCH_HEAD",
+            check=False,
+        )
+    if sync.returncode != 0:
+        detail = (sync.stderr or sync.stdout or "").strip()
+        raise PtqError(f"git branch sync failed: {detail or 'unknown error'}")
+
+    if stashed:
+        _log("Re-applying local solver changes onto PR branch...")
+        pop = backend.run(f"cd {worktree} && git stash pop", check=False)
+        if pop.returncode != 0:
+            detail = (pop.stderr or pop.stdout or "").strip()
+            raise PtqError(f"git stash pop failed: {detail or 'unknown error'}")
+    return True
+
+
+def sync_existing_pr_branch(
+    repo: JobRepository,
+    job_id: str,
+    *,
+    log: Callable[[str], None] | None = None,
+) -> str:
+    """Synchronize a job worktree to its existing open PR branch, if any."""
+    _log = log or (lambda _: None)
+    job = repo.get(job_id)
+    if job.issue is None:
+        return ""
+    backend = backend_for_job(job)
+    job_dir = f"{backend.workspace}/jobs/{job_id}"
+    profile = get_profile(job.repo)
+    worktree = f"{job_dir}/{profile.dir_name}"
+    branch = f"ptq/{job.issue}"
+    pr_url = _existing_open_pr_url(
+        repo,
+        job_id,
+        backend=backend,
+        worktree=worktree,
+        branch=branch,
+    )
+    if not pr_url:
+        return ""
+    if _sync_remote_pr_branch(backend, worktree, branch, _log):
+        _log(f"Synced worktree to existing PR: {pr_url}")
+    return pr_url
+
+
 def _review_comment_entry(item: dict) -> dict | None:
     body = str(item.get("body") or "").strip()
     if not body or _is_ptq_managed_comment(body):
@@ -1100,6 +1198,56 @@ def _reply_to_resolved_pr_comments(
             _log(f"Could not reply to resolved PR comment: {detail}")
 
 
+def _push_branch(
+    backend: Backend,
+    worktree: str,
+    branch: str,
+) -> subprocess.CompletedProcess[str]:
+    return backend.run(
+        f"cd {worktree} && git push -u origin {shlex.quote(branch)}",
+        check=False,
+    )
+
+
+def _push_branch_with_rebase_retry(
+    backend: Backend,
+    worktree: str,
+    branch: str,
+    _log: Callable[[str], None],
+) -> None:
+    push_result = _push_branch(backend, worktree, branch)
+    if push_result.returncode == 0:
+        return
+
+    detail = (push_result.stderr or push_result.stdout or "").strip()
+    if "fetch first" not in detail and "non-fast-forward" not in detail:
+        raise PtqError(f"git push failed: {detail or 'unknown error'}")
+
+    _log("Push was rejected; fetching remote PR branch and rebasing...")
+    quoted_branch = shlex.quote(branch)
+    fetch = backend.run(
+        f"cd {worktree} && "
+        "git -c submodule.recurse=false "
+        "-c fetch.recurseSubmodules=false "
+        f"fetch --no-recurse-submodules origin {quoted_branch}",
+        check=False,
+    )
+    if fetch.returncode != 0:
+        fetch_detail = (fetch.stderr or fetch.stdout or "").strip()
+        raise PtqError(f"git fetch failed after push rejection: {fetch_detail}")
+
+    rebase = backend.run(f"cd {worktree} && git rebase FETCH_HEAD", check=False)
+    if rebase.returncode != 0:
+        rebase_detail = (rebase.stderr or rebase.stdout or "").strip()
+        raise PtqError(f"git rebase failed after push rejection: {rebase_detail}")
+
+    _log("Retrying branch push after rebase...")
+    retry = _push_branch(backend, worktree, branch)
+    if retry.returncode != 0:
+        retry_detail = (retry.stderr or retry.stdout or "").strip()
+        raise PtqError(f"git push failed: {retry_detail or 'unknown error'}")
+
+
 def create_pr(
     repo: JobRepository,
     job_id: str,
@@ -1141,6 +1289,16 @@ def create_pr(
     status = _read_json_file(backend, f"{job_dir}/status.json")
     branch = f"ptq/{job.issue}" if job.issue is not None else f"ptq/{job_id}"
     pr_title = _build_pr_title(title, status=status, report=report)
+    if not existing_open_pr_url:
+        existing_open_pr_url = _existing_open_pr_url(
+            repo,
+            job_id,
+            backend=backend,
+            worktree=worktree,
+            branch=branch,
+        )
+        if existing_open_pr_url:
+            _log(f"Found existing open PR for branch {branch}: {existing_open_pr_url}")
 
     _log(f"Branch: {branch}")
     _log(f"Title: {pr_title}")
@@ -1175,8 +1333,12 @@ def create_pr(
     )
     commit_file = ".ptq_commit_message"
     quoted_commit_file = shlex.quote(commit_file)
-    _log(f"Checking out branch {branch}...")
-    backend.run(f"cd {worktree} && git checkout -B '{branch}'")
+    if not (
+        existing_open_pr_url
+        and _sync_remote_pr_branch(backend, worktree, branch, _log)
+    ):
+        _log(f"Checking out branch {branch}...")
+        backend.run(f"cd {worktree} && git checkout -B {shlex.quote(branch)}")
     _log("Staging changes...")
     backend.run(f"cd {worktree} && git add -A")
     has_staged_changes = (
@@ -1205,14 +1367,7 @@ def create_pr(
 
     _ensure_ssh_remote(backend, worktree, _log)
     _log("Pushing branch...")
-    push_result = backend.run(
-        f"cd {worktree} && git push -u origin '{branch}'",
-        check=False,
-    )
-    if push_result.returncode != 0:
-        stderr = push_result.stderr.strip() if push_result.stderr else ""
-        stdout = push_result.stdout.strip() if push_result.stdout else ""
-        raise PtqError(f"git push failed: {stderr or stdout or 'unknown error'}")
+    _push_branch_with_rebase_retry(backend, worktree, branch, _log)
     url = ""
     if existing_open_pr_url:
         _log("Updating existing PR...")

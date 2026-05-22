@@ -93,7 +93,10 @@ class TestFetchIssue:
                 "returncode": 0,
             },
         )()
-        with patch("ptq.issue.subprocess.run", return_value=mock_result) as mock_run:
+        with (
+            patch("ptq.issue.harness_available", return_value=False),
+            patch("ptq.issue.subprocess.run", return_value=mock_result) as mock_run,
+        ):
             result = fetch_issue(12345)
         assert result == fake_data
         args = mock_run.call_args[0][0]

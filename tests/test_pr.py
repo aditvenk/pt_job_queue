@@ -14,6 +14,7 @@ from ptq.application.pr_service import (
     _ensure_ssh_remote,
     create_pr,
     fetch_pr_feedback,
+    sync_existing_pr_branch,
 )
 from ptq.domain.models import JobRecord, PtqError
 from ptq.infrastructure.job_repository import JobRepository
@@ -312,6 +313,8 @@ class TestCreatePr:
         backend.workspace = "~/ptq_workspace"
 
         def run_side_effect(cmd, check=True):
+            if "git ls-remote --exit-code --heads origin" in cmd:
+                return CompletedProcess("", 1, "", "")
             if "git remote get-url" in cmd:
                 return CompletedProcess("", 0, "git@github.com:pytorch/pytorch.git\n")
             if "git merge-base" in cmd:
@@ -425,6 +428,48 @@ class TestCreatePr:
         ]
         assert not create_calls
 
+    def test_updates_existing_pr_from_remote_branch(self, tmp_path):
+        repo, backend = self._setup(tmp_path)
+        job = repo.get("20260217-42")
+        job.pr_url = "https://github.com/pytorch/pytorch/pull/77"
+        repo.save(job)
+
+        def run_side_effect(cmd, check=True):
+            if "gh pr view" in cmd:
+                return CompletedProcess("", 0, "OPEN\t\n", "")
+            if "git ls-remote --exit-code --heads origin ptq/42" in cmd:
+                return CompletedProcess("", 0, "abc\trefs/heads/ptq/42\n", "")
+            if "fetch --no-recurse-submodules origin ptq/42" in cmd:
+                return CompletedProcess("", 0, "", "")
+            if "git status --porcelain" in cmd:
+                return CompletedProcess("", 0, " M torch/foo.py\n", "")
+            if "git stash push -u -m ptq-sync-existing-pr" in cmd:
+                return CompletedProcess("", 0, "Saved working directory", "")
+            if "git branch --show-current" in cmd:
+                return CompletedProcess("", 0, "ptq-20260217-42\n", "")
+            if "git checkout -B ptq/42 FETCH_HEAD" in cmd:
+                return CompletedProcess("", 0, "", "")
+            if "git stash pop" in cmd:
+                return CompletedProcess("", 0, "", "")
+            if "gh pr edit 'https://github.com/pytorch/pytorch/pull/77'" in cmd:
+                return CompletedProcess("", 0, "", "")
+            if "git remote get-url" in cmd:
+                return CompletedProcess("", 0, "git@github.com:pytorch/pytorch.git\n")
+            return CompletedProcess("", 0, "")
+
+        backend.run = MagicMock(side_effect=run_side_effect)
+        with patch("ptq.application.pr_service.backend_for_job", return_value=backend):
+            result = create_pr(repo, "20260217-42", human_note="Updated note")
+
+        assert result.url == "https://github.com/pytorch/pytorch/pull/77"
+        commands = [call.args[0] for call in backend.run.call_args_list]
+        fetch_idx = next(
+            i for i, cmd in enumerate(commands) if "fetch --no-recurse-submodules origin ptq/42" in cmd
+        )
+        add_idx = next(i for i, cmd in enumerate(commands) if "git add -A" in cmd)
+        assert fetch_idx < add_idx
+        assert any("git stash pop" in cmd for cmd in commands)
+
     def test_closed_saved_pr_creates_new_pr(self, tmp_path):
         repo, backend = self._setup(tmp_path)
         job = repo.get("20260217-42")
@@ -508,6 +553,40 @@ class TestCreatePr:
         ]
         assert len(push_calls) == 1
         assert "--force" not in str(push_calls[0])
+
+    def test_push_rebases_and_retries_on_fetch_first(self, tmp_path):
+        repo, backend = self._setup(tmp_path)
+        push_attempts = 0
+
+        def run_side_effect(cmd, check=True):
+            nonlocal push_attempts
+            if "git ls-remote --exit-code --heads origin" in cmd:
+                return CompletedProcess("", 1, "", "")
+            if "git remote get-url" in cmd:
+                return CompletedProcess("", 0, "git@github.com:pytorch/pytorch.git\n")
+            if "git push -u origin ptq/42" in cmd:
+                push_attempts += 1
+                if push_attempts == 1:
+                    return CompletedProcess("", 1, "", "error: fetch first")
+                return CompletedProcess("", 0, "", "")
+            if "fetch --no-recurse-submodules origin ptq/42" in cmd:
+                return CompletedProcess("", 0, "", "")
+            if "git rebase FETCH_HEAD" in cmd:
+                return CompletedProcess("", 0, "", "")
+            if "gh pr create" in cmd:
+                return CompletedProcess(
+                    "", 0, "https://github.com/pytorch/pytorch/pull/99\n"
+                )
+            return CompletedProcess("", 0, "")
+
+        backend.run = MagicMock(side_effect=run_side_effect)
+        with patch("ptq.application.pr_service.backend_for_job", return_value=backend):
+            create_pr(repo, "20260217-42", human_note="Trivial fix")
+
+        commands = [call.args[0] for call in backend.run.call_args_list]
+        assert push_attempts == 2
+        assert any("fetch --no-recurse-submodules origin ptq/42" in cmd for cmd in commands)
+        assert any("git rebase FETCH_HEAD" in cmd for cmd in commands)
 
     def test_pr_create_is_always_draft(self, tmp_path):
         repo, backend = self._setup(tmp_path)
@@ -794,6 +873,36 @@ class TestCreatePr:
         assert feedback is not None
         assert repo.get("20260217-42").pr_url == "https://github.com/pytorch/pytorch/pull/88"
         assert feedback["comments"][0]["body"] == "Address this comment."
+
+    def test_sync_existing_pr_branch_discovers_pr_by_branch(self, tmp_path):
+        repo, backend = self._setup(tmp_path)
+
+        def run_side_effect(cmd, check=True):
+            if "gh pr list" in cmd:
+                return CompletedProcess(
+                    "", 0, "https://github.com/pytorch/pytorch/pull/88\n", ""
+                )
+            if "git ls-remote --exit-code --heads origin ptq/42" in cmd:
+                return CompletedProcess("", 0, "abc\trefs/heads/ptq/42\n", "")
+            if "fetch --no-recurse-submodules origin ptq/42" in cmd:
+                return CompletedProcess("", 0, "", "")
+            if "git status --porcelain" in cmd:
+                return CompletedProcess("", 0, "", "")
+            if "git branch --show-current" in cmd:
+                return CompletedProcess("", 0, "ptq/42\n", "")
+            if "git rebase FETCH_HEAD" in cmd:
+                return CompletedProcess("", 0, "", "")
+            return CompletedProcess("", 0, "")
+
+        backend.run = MagicMock(side_effect=run_side_effect)
+        with patch("ptq.application.pr_service.backend_for_job", return_value=backend):
+            pr_url = sync_existing_pr_branch(repo, "20260217-42")
+
+        assert pr_url == "https://github.com/pytorch/pytorch/pull/88"
+        assert repo.get("20260217-42").pr_url == pr_url
+        commands = [call.args[0] for call in backend.run.call_args_list]
+        assert any("fetch --no-recurse-submodules origin ptq/42" in cmd for cmd in commands)
+        assert any("git rebase FETCH_HEAD" in cmd for cmd in commands)
 
     def test_replies_to_resolved_pr_comments_with_bot_prefix(self, tmp_path):
         repo, backend = self._setup(tmp_path)
