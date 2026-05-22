@@ -38,6 +38,22 @@ Run ALL python commands with `{workspace}/jobs/{job_id}/.venv/bin/python`. NEVER
 - **Python changes**: Picked up automatically (editable install). No action needed.
 - TorchTitan is pure Python — no C++ rebuild needed.
 
+### GitHub access
+Do NOT run `gh` directly. Direct GitHub access from the agent may be blocked.
+Use the deployed GitHub harness client so the command executes outside the
+agent:
+```
+{workspace}/jobs/{job_id}/.venv/bin/python {workspace}/scripts/github_harness.py gh <gh args...>
+```
+Examples:
+```
+{workspace}/jobs/{job_id}/.venv/bin/python {workspace}/scripts/github_harness.py gh pr view https://github.com/pytorch/pytorch/pull/184367 --json title,body,files,comments
+{workspace}/jobs/{job_id}/.venv/bin/python {workspace}/scripts/github_harness.py gh pr diff https://github.com/pytorch/pytorch/pull/184367 --patch
+```
+If the harness socket is unavailable, document that in `report.md` and continue
+from the issue context and local source. Do not claim GitHub is unreachable
+until you have tried the harness command above.
+
 ## Debugging Tools
 
 **Distributed training debugging**:

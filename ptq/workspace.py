@@ -198,25 +198,41 @@ def build_pytorch(
 
 def deploy_scripts(backend: Backend) -> None:
     from pathlib import Path
+    import shlex
 
     from ptq.config import load_config
 
     workspace = backend.workspace
     scripts_dir = Path(__file__).parent.parent / "scripts"
     backend.run(f"mkdir -p {workspace}/scripts")
+    helper_scripts = [
+        script
+        for pattern in ("*.sh", "*.py")
+        for script in sorted(scripts_dir.glob(pattern))
+    ]
 
     if isinstance(backend, RemoteBackend):
-        for script in scripts_dir.glob("*.sh"):
+        for script in helper_scripts:
             backend.copy_to(script, f"{workspace}/scripts/{script.name}")
     else:
         import shutil
 
         dest_dir = Path(workspace.replace("~", str(Path.home()))) / "scripts"
         dest_dir.mkdir(parents=True, exist_ok=True)
-        for script in scripts_dir.glob("*.sh"):
+        for script in helper_scripts:
             shutil.copy2(script, dest_dir / script.name)
 
-    backend.run(f"chmod +x {workspace}/scripts/*.sh")
+    def quote_script_path(path: str) -> str:
+        if path.startswith("~/"):
+            return "~/" + shlex.quote(path[2:])
+        return shlex.quote(path)
+
+    script_paths = " ".join(
+        quote_script_path(f"{workspace}/scripts/{script.name}")
+        for script in helper_scripts
+    )
+    if script_paths:
+        backend.run(f"chmod +x {script_paths}")
 
     cfg = load_config()
     if cfg.build_env:

@@ -4,8 +4,10 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import socket
 import socketserver
 import subprocess
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -25,6 +27,49 @@ def github_env() -> dict[str, str]:
     for key, value in DEFAULT_ENV.items():
         env.setdefault(key, value)
     return env
+
+
+def harness_socket_path() -> Path:
+    raw = os.environ.get("PTQ_GITHUB_HARNESS_SOCKET")
+    return Path(raw).expanduser() if raw else DEFAULT_SOCKET
+
+
+def harness_available(socket_path: Path | None = None) -> bool:
+    return (socket_path or harness_socket_path()).exists()
+
+
+def call_harness(
+    action: str,
+    *,
+    socket_path: Path | None = None,
+    timeout: int = 120,
+    **payload: Any,
+) -> Any:
+    path = (socket_path or harness_socket_path()).expanduser()
+    request = json.dumps({"action": action, **payload}).encode("utf-8") + b"\n"
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+            client.settimeout(timeout)
+            client.connect(str(path))
+            client.sendall(request)
+            chunks: list[bytes] = []
+            while True:
+                chunk = client.recv(65536)
+                if not chunk:
+                    break
+                chunks.append(chunk)
+    except OSError as exc:
+        raise RuntimeError(f"GitHub harness unavailable at {path}: {exc}") from exc
+
+    try:
+        response = json.loads(b"".join(chunks).decode("utf-8"))
+    except json.JSONDecodeError as exc:
+        raise RuntimeError("GitHub harness returned invalid JSON.") from exc
+
+    if not response.get("ok"):
+        error = response.get("error") or "GitHub harness request failed."
+        raise RuntimeError(str(error))
+    return response.get("data")
 
 
 def run_gh(args: list[str]) -> Any:
@@ -88,6 +133,39 @@ def search_issues(repo: str, query: str, limit: int) -> list[dict]:
     )
 
 
+def client_fetch_issue(repo: str, issue: int) -> dict:
+    if harness_available():
+        try:
+            return call_harness("fetch_issue", repo=repo, issue_number=issue)
+        except RuntimeError as exc:
+            if "GitHub harness unavailable" not in str(exc):
+                raise
+    return fetch_issue(repo, issue)
+
+
+def client_search_issues(repo: str, query: str, limit: int) -> list[dict]:
+    if harness_available():
+        try:
+            return call_harness("search_issues", repo=repo, query=query, limit=limit)
+        except RuntimeError as exc:
+            if "GitHub harness unavailable" not in str(exc):
+                raise
+    return search_issues(repo, query, limit)
+
+
+def client_run_gh(args: list[str], cwd: str | None = None) -> dict[str, Any]:
+    if not harness_available():
+        path = harness_socket_path()
+        raise RuntimeError(
+            f"GitHub harness socket not found at {path}. "
+            "Start it outside the agent with `python scripts/github_harness.py serve`."
+        )
+    data = call_harness("gh", args=args, cwd=cwd)
+    if not isinstance(data, dict):
+        raise RuntimeError("GitHub harness returned an invalid gh response.")
+    return data
+
+
 def handle_request(request: dict) -> Any:
     action = request.get("action")
     if action == "fetch_issue":
@@ -137,7 +215,33 @@ def serve(socket_path: Path) -> None:
         server.serve_forever()
 
 
-def main() -> None:
+def _main_gh(argv: list[str]) -> None:
+    cwd = None
+    gh_args = list(argv)
+    if gh_args and gh_args[0] == "--cwd":
+        if len(gh_args) < 2:
+            raise RuntimeError("gh --cwd requires a path.")
+        cwd = gh_args[1]
+        gh_args = gh_args[2:]
+    elif gh_args and gh_args[0].startswith("--cwd="):
+        cwd = gh_args[0].split("=", 1)[1]
+        gh_args = gh_args[1:]
+    if not gh_args:
+        raise RuntimeError(
+            "gh requires arguments, for example: gh pr view <url> --json title"
+        )
+    result = client_run_gh(gh_args, cwd=cwd)
+    sys.stdout.write(str(result.get("stdout") or ""))
+    sys.stderr.write(str(result.get("stderr") or ""))
+    raise SystemExit(int(result.get("returncode") or 0))
+
+
+def main(argv: list[str] | None = None) -> None:
+    argv = sys.argv[1:] if argv is None else argv
+    if argv and argv[0] == "gh":
+        _main_gh(argv[1:])
+        return
+
     parser = argparse.ArgumentParser(description="PTQ GitHub access harness.")
     sub = parser.add_subparsers(dest="cmd", required=True)
 
@@ -153,14 +257,21 @@ def main() -> None:
     search_parser.add_argument("--repo", default="pytorch/pytorch")
     search_parser.add_argument("--limit", type=int, default=20)
 
-    args = parser.parse_args()
+    sub.add_parser("gh", help="Run gh through the harness socket.")
+
+    args = parser.parse_args(argv)
     if args.cmd == "serve":
         serve(args.socket)
     elif args.cmd == "fetch-issue":
-        print(json.dumps(fetch_issue(args.repo, args.issue), indent=2))
+        print(json.dumps(client_fetch_issue(args.repo, args.issue), indent=2))
     elif args.cmd == "search-issues":
-        print(json.dumps(search_issues(args.repo, args.query, args.limit), indent=2))
+        data = client_search_issues(args.repo, args.query, args.limit)
+        print(json.dumps(data, indent=2))
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except RuntimeError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        raise SystemExit(1)

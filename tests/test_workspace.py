@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
 from unittest.mock import MagicMock
+from unittest.mock import patch
 
 import pytest
 
-from ptq.workspace import detect_cuda_version, setup_workspace
+from ptq.workspace import detect_cuda_version, deploy_scripts, setup_workspace
 
 
 def _make_backend(stdout: str = "", returncode: int = 0) -> MagicMock:
@@ -80,3 +82,28 @@ class TestSetupWorkspace:
 
         cmds = [call.args[0] for call in backend.run.call_args_list]
         assert any("git reset --hard origin/main" in cmd for cmd in cmds)
+
+
+class TestDeployScripts:
+    def test_deploys_python_harness_with_shell_helpers(self, tmp_path):
+        backend = MagicMock()
+        backend.workspace = str(tmp_path)
+        backend.run.return_value = MagicMock(returncode=0, stdout="")
+
+        with patch(
+            "ptq.config.load_config",
+            return_value=SimpleNamespace(build_env={}),
+        ):
+            deploy_scripts(backend)
+
+        assert (tmp_path / "scripts" / "rebuild.sh").exists()
+        assert (tmp_path / "scripts" / "github_harness.py").exists()
+
+        chmod_cmds = [
+            call.args[0]
+            for call in backend.run.call_args_list
+            if call.args and call.args[0].startswith("chmod +x")
+        ]
+        assert chmod_cmds
+        assert "rebuild.sh" in chmod_cmds[-1]
+        assert "github_harness.py" in chmod_cmds[-1]
