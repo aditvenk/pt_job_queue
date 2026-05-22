@@ -843,6 +843,49 @@ def test_orchestrate_message_becomes_initial_solver_guidance():
         captured["config"].initial_message
         == "Start by checking optimizer state restoration."
     )
+    assert captured["config"].adhoc is False
+
+
+def test_orchestrate_message_without_issue_runs_adhoc_loop():
+    captured = {}
+
+    class FakeEvaluator:
+        def __init__(self, **kwargs):
+            pass
+
+    class FakeOrchestrator:
+        def __init__(self, config, **kwargs):
+            captured["config"] = config
+
+        async def run(self):
+            return []
+
+    with (
+        patch("ptq.config.load_config", return_value=_fake_orchestrate_config()),
+        patch("ptq.evaluator.Evaluator", FakeEvaluator),
+        patch("ptq.orchestrator.Orchestrator", FakeOrchestrator),
+    ):
+        result = runner.invoke(
+            app,
+            [
+                "orchestrate",
+                "--repo",
+                "torchtitan",
+                "--message",
+                "Investigate and fix the checkpoint load failure.",
+                "--pr",
+            ],
+        )
+
+    assert result.exit_code == 0, result.output
+    assert captured["config"].adhoc is True
+    assert captured["config"].repo == "torchtitan"
+    assert captured["config"].issue_selection_prompt == ""
+    assert (
+        captured["config"].initial_message
+        == "Investigate and fix the checkpoint load failure."
+    )
+    assert captured["config"].push_pr is True
 
 
 def test_orchestrate_infers_repo_from_configured_github_repo():

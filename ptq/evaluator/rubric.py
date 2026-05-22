@@ -42,7 +42,8 @@ def build_evaluation_prompt(
     lint_output: str,
 ) -> str:
     return f"""\
-You are evaluating a PyTorch issue-fixing agent's output. Return only valid JSON
+You are evaluating a PyTorch issue-fixing agent's output. The task may come
+from a GitHub issue or from an adhoc human message. Return only valid JSON
 matching this schema:
 
 ```json
@@ -58,6 +59,9 @@ Step 0 - Repro Fidelity (BLOCKING, gate check)
   - minimal but faithful to the reporter's scenario
   - cannot pass/fail for reasons unrelated to the reported bug
 - If the repro was extracted directly from the issue (`repro_<issue>.py`), check only that it appears faithfully transcribed and set `repro_fidelity` to `from_issue`.
+- If this is an adhoc task and `status_json.repro_source` is `not_applicable`,
+  do not block solely on missing repro. Instead evaluate whether the report,
+  tests, and manual validation are appropriate for the requested task.
 - If the repro is unfaithful, immediately return `verdict="needs_revision"`, `score=0.0`, and comments telling the solver to fix the repro first. Do not evaluate the fix.
 
 Step 1 - Fix Correctness
@@ -97,7 +101,7 @@ Step 4 - Code Quality
 
 ## Evaluation Context
 
-- Issue: pytorch/pytorch#{issue_number}
+- Issue / task id: {issue_number if issue_number > 0 else "adhoc"}
 - Iteration: {iteration}
 - Max iterations: {max_iterations}
 - Approval threshold: {approval_threshold}

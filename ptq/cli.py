@@ -1182,6 +1182,7 @@ def _orchestrate_report_display(job_id: str | None) -> str | None:
 def _print_orchestrate_results(results) -> None:
     for result in results:
         issue_number = result.issue.number
+        label = f"#{issue_number}" if issue_number > 0 else "adhoc"
         verdict = result.verdict
         score = result.score
         iterations = result.iterations
@@ -1189,7 +1190,7 @@ def _print_orchestrate_results(results) -> None:
         branch = result.branch or "-"
         pr_url = getattr(result, "pr_url", None)
         console.print(
-            f"#{issue_number} {verdict} "
+            f"{label} {verdict} "
             f"score={score:.2f} iterations={iterations} "
             f"job={job_id} branch={branch}"
         )
@@ -1430,14 +1431,17 @@ def orchestrate(
         profile = get_profile(repo_name)
         github_repo = profile.github_repo
 
+    adhoc = issue_number is None and prompt is None and message is not None
     issue_prompt = ""
-    if issue_number is not None:
+    if adhoc:
+        issue_prompt = ""
+    elif issue_number is not None:
         issue_prompt = f"https://github.com/{github_repo}/issues/{issue_number}"
     else:
         issue_prompt = prompt or str(orch.get("issue_selection_prompt") or "")
-    if not issue_prompt:
+    if not adhoc and not issue_prompt:
         raise typer.BadParameter(
-            "Provide --prompt or set [orchestrator].issue_selection_prompt."
+            "Provide --issue, --prompt, or --message for an adhoc orchestrator task."
         )
 
     agent = cfg.default_agent
@@ -1460,6 +1464,7 @@ def orchestrate(
 
     config = OrchestratorConfig(
         issue_selection_prompt=issue_prompt,
+        adhoc=adhoc,
         repo=repo_name,
         github_repo=github_repo,
         max_issues=max_issues_value,

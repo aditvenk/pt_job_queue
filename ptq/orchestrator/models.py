@@ -20,6 +20,7 @@ class Issue:
 @dataclass
 class OrchestratorConfig:
     issue_selection_prompt: str
+    adhoc: bool = False
     repo: str = "pytorch"
     github_repo: str = "pytorch/pytorch"
     max_issues: int = 20

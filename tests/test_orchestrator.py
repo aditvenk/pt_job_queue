@@ -402,6 +402,61 @@ def test_launch_solver_uses_configured_repo_profile(tmp_path):
     assert progress_messages == ["#123: solver setup: Creating per-job venv..."]
 
 
+def test_adhoc_launch_uses_run_service_adhoc_mode(tmp_path):
+    captured = {}
+
+    class FakeJobRepo:
+        def find_by_issue(self, *args, **kwargs):
+            raise AssertionError("adhoc orchestrate must not resolve by issue")
+
+    class FakeBackend:
+        workspace = "~/.ptq_workspace"
+
+        def run(self, cmd, check=True):
+            assert cmd == "date +%s"
+            return CompletedProcess("", 0, "123\n", "")
+
+    def fake_launch(job_repo, backend, request, *, on_progress=None):
+        captured["request"] = request
+        assert on_progress is not None
+        on_progress("Creating torchtitan worktree...")
+        return "adhoc-job"
+
+    progress_messages = []
+
+    orchestrator = Orchestrator(
+        OrchestratorConfig(
+            issue_selection_prompt="",
+            adhoc=True,
+            repo="torchtitan",
+            github_repo="pytorch/torchtitan",
+            initial_message="Fix the checkpoint load failure.",
+            log_path=tmp_path / "runs.jsonl",
+        ),
+        job_repo=FakeJobRepo(),
+        on_progress=progress_messages.append,
+    )
+    with (
+        patch("ptq.orchestrator.orchestrator.create_backend", return_value=FakeBackend()),
+        patch("ptq.orchestrator.orchestrator.run_service.launch", fake_launch),
+    ):
+        job_id = asyncio.run(
+            orchestrator._launch_solver(
+                Issue(number=0, title="Adhoc task", body="Fix it"),
+                review=None,
+            )
+        )
+
+    assert job_id == "adhoc-job"
+    assert captured["request"].issue_number is None
+    assert captured["request"].issue_data is None
+    assert captured["request"].repo == "torchtitan"
+    assert captured["request"].message == "Fix the checkpoint load failure."
+    assert progress_messages == [
+        "adhoc: solver setup: Creating torchtitan worktree..."
+    ]
+
+
 def test_pr_feedback_snapshot_includes_failing_ci():
     text = _format_pr_feedback_snapshot(
         Issue(number=1, title="bug"),

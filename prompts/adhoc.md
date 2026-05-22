@@ -79,6 +79,12 @@ Write these files to `{workspace}/jobs/{job_id}/`:
 
 **report.md** — A concise summary of what you did and what you found.
 
+If the task involved a behavior change, create a focused validation or repro
+script at `{workspace}/jobs/{job_id}/repro_adhoc_generated.py` and include how
+you ran it in `report.md`. If no executable repro applies to the user's task,
+say why in `report.md` and set `"repro_source": "not_applicable"` in
+`status.json`.
+
 **fix.diff** (if you made code changes) — Generate with:
 ```
 cd {workspace}/jobs/{job_id}/pytorch && git diff > {workspace}/jobs/{job_id}/fix.diff
@@ -86,4 +92,25 @@ cd {workspace}/jobs/{job_id}/pytorch && git diff > {workspace}/jobs/{job_id}/fix
 
 If you made code changes, run `spin fixlint` from `{workspace}/jobs/{job_id}/pytorch/` before generating `fix.diff` and before finishing. If lint setup or lint execution fails because of missing tools, dependency downloads, proxy/network failures, or unrelated lint infrastructure issues, record the exact command and failure in `report.md`, then still generate `fix.diff`.
 
-IMPORTANT: Always generate report.md before finishing. Generate fix.diff if you made any code changes.
+**status.json** — Write structured machine-readable status before finishing:
+```json
+{{
+  "state": "ready_for_review",
+  "iteration": 1,
+  "repro_source": "generated",
+  "repro_file": "repro_adhoc_generated.py",
+  "repro_passes_before_fix": false,
+  "repro_passes_after_fix": true,
+  "how_repro_was_run": "{workspace}/jobs/{job_id}/.venv/bin/python {workspace}/jobs/{job_id}/repro_adhoc_generated.py",
+  "files_changed": ["torch/example.py"],
+  "pr_title": "One-line summary of the code change",
+  "summary": "Short root-cause and fix summary",
+  "resolved_pr_comments": []
+}}
+```
+
+Use `"repro_source": "not_applicable"` and `"repro_file": ""` only when the
+task is analytical, documentation-only, or otherwise has no meaningful
+executable repro.
+
+IMPORTANT: Always generate report.md, fix.diff, and status.json before finishing.

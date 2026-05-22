@@ -23,7 +23,11 @@ def infer_repro_source(
     source = str(status_json.get("repro_source") or "").strip().lower()
     if source in {"generated", "from_issue", "issue", "extracted"}:
         return "from_issue" if source in {"from_issue", "issue", "extracted"} else source
+    if source in {"not_applicable", "not-applicable", "n/a", "none"}:
+        return "not_applicable"
 
+    if repro_filename in {"repro_adhoc.py", "repro_adhoc_generated.py"}:
+        return "generated"
     if repro_filename == f"repro_{issue_number}.py":
         return "from_issue"
     if repro_filename == f"repro_{issue_number}_generated.py":
@@ -47,6 +51,14 @@ def validate_repro_presence(
     )
     comments: list[ReviewComment] = []
     blocks = False
+
+    if source == "not_applicable":
+        return ReproCheck(
+            source=source,
+            fidelity_hint="uncertain",
+            comments=[],
+            blocks_evaluation=False,
+        )
 
     if not repro_script.strip():
         blocks = True

@@ -49,6 +49,9 @@ class Orchestrator:
         self._job_launch_times: dict[str, int] = {}
 
     async def run(self) -> list[SolveResult]:
+        if self.config.adhoc:
+            return await self._run_adhoc()
+
         self._progress("Selecting issues...")
         issues = await self.select_issues()
         issue_list = ", ".join(f"#{issue.number}" for issue in issues) or "none"
@@ -90,6 +93,44 @@ class Orchestrator:
 
         return await asyncio.gather(*(guarded(issue) for issue in issues))
 
+    async def _run_adhoc(self) -> list[SolveResult]:
+        task = (self.config.initial_message or "").strip()
+        if not task:
+            raise RuntimeError("Adhoc orchestrate requires --message.")
+        issue = Issue(
+            number=0,
+            title="Adhoc task",
+            body=task,
+            raw={},
+        )
+        self._progress("Starting adhoc task")
+        self.reporter.log(
+            "adhoc_start",
+            repo=self.config.repo,
+            message=task,
+            dry_run=self.config.dry_run,
+        )
+        if self.config.dry_run:
+            self._progress("Dry run: not launching solver job.")
+            return [
+                SolveResult(
+                    issue=issue,
+                    verdict="dry_run",
+                    score=0.0,
+                    iterations=0,
+                    state="dry_run",
+                )
+            ]
+
+        self._progress("Checking evaluator configuration...")
+        await asyncio.to_thread(self.evaluator.validate_configuration)
+        result = await self.solve_issue(issue)
+        await self.post_process(result)
+        self._progress(
+            f"Finished adhoc task: {result.verdict} score={result.score:.2f}"
+        )
+        return [result]
+
     async def select_issues(self) -> list[Issue]:
         selector = IssueSelector(self.config.github_repo)
         return await asyncio.to_thread(
@@ -102,9 +143,10 @@ class Orchestrator:
         review = None
         job_id = None
         full_review_mode = self._full_review_mode(issue)
+        label = _issue_label(issue)
         try:
             for iteration in range(1, self.config.max_iterations + 1):
-                self._progress(f"#{issue.number} iteration {iteration}: launching solver")
+                self._progress(f"{label} iteration {iteration}: launching solver")
                 pr_feedback = await self._fetch_pr_feedback(issue)
                 if pr_feedback:
                     self._progress(_format_pr_feedback_snapshot(issue, pr_feedback))
@@ -118,12 +160,12 @@ class Orchestrator:
                 )
                 job_id = await self._launch_solver(issue, review, pr_feedback)
                 self._progress(
-                    f"#{issue.number} iteration {iteration}: solver job {job_id} "
+                    f"{label} iteration {iteration}: solver job {job_id} "
                     f"launched; inspect with `uv run ptq peek {job_id} --log 80`"
                 )
                 await self._wait_for_job(job_id)
                 self._progress(
-                    f"#{issue.number} iteration {iteration}: solver stopped, "
+                    f"{label} iteration {iteration}: solver stopped, "
                     "reading artifacts"
                 )
                 solver_output = await self._read_solver_output(
@@ -144,7 +186,7 @@ class Orchestrator:
                 )
                 if review.verdict in {"approved", "shelve"}:
                     self._progress(
-                        f"#{issue.number} iteration {iteration}: "
+                        f"{label} iteration {iteration}: "
                         f"{review.verdict} score={review.score:.2f}"
                     )
                     return SolveResult(
@@ -167,7 +209,7 @@ class Orchestrator:
                 state="max_iterations",
             )
         except Exception as exc:
-            self._progress(f"#{issue.number}: error: {exc}")
+            self._progress(f"{label}: error: {exc}")
             return SolveResult(
                 issue=issue,
                 verdict="error",
@@ -195,13 +237,13 @@ class Orchestrator:
         if full_review_mode or not has_additional_reviewers():
             mode = "full" if full_review_mode else "agent"
             self._progress(
-                f"#{issue.number} iteration {iteration}: running {mode} evaluator"
+                f"{_issue_label(issue)} iteration {iteration}: running {mode} evaluator"
             )
             review = await asyncio.to_thread(self.evaluator.evaluate, solver_output)
             return review, full_review_mode
 
         self._progress(
-            f"#{issue.number} iteration {iteration}: running agent evaluators"
+            f"{_issue_label(issue)} iteration {iteration}: running agent evaluators"
         )
         agent_review = await asyncio.to_thread(
             self.evaluator.evaluate_base_reviewers,
@@ -211,7 +253,7 @@ class Orchestrator:
             return agent_review, False
 
         self._progress(
-            f"#{issue.number} iteration {iteration}: agent evaluators approved; "
+            f"{_issue_label(issue)} iteration {iteration}: agent evaluators approved; "
             "running human-profile evaluators"
         )
         profile_review = await asyncio.to_thread(
@@ -225,7 +267,7 @@ class Orchestrator:
         if profile_review.verdict != "approved":
             self._set_full_review_mode(issue, True)
             self._progress(
-                f"#{issue.number}: human-profile evaluator requested revisions; "
+                f"{_issue_label(issue)}: human-profile evaluator requested revisions; "
                 "future iterations will run all evaluators"
             )
             self.reporter.log(
@@ -238,33 +280,34 @@ class Orchestrator:
         return review, False
 
     async def post_process(self, result: SolveResult) -> None:
+        label = _issue_label(result.issue)
         if result.verdict == "approved" and result.job_id:
             if self.config.push_pr:
                 self._progress(
-                    f"#{result.issue.number}: approved, pushing draft PR"
+                    f"{label}: approved, pushing draft PR"
                 )
                 try:
                     pr_result = await self._push_draft_pr(result)
                     result.branch = pr_result.branch
                     result.pr_url = pr_result.url
                     self._progress(
-                        f"#{result.issue.number}: draft PR ready: {pr_result.url}"
+                        f"{label}: draft PR ready: {pr_result.url}"
                     )
                     if self.config.watch_pr:
                         await self._watch_pr(result)
                 except Exception as exc:
                     result.error = f"Approved, but failed to push draft PR: {exc}"
-                    self._progress(f"#{result.issue.number}: {result.error}")
+                    self._progress(f"{label}: {result.error}")
                 self.reporter.log_result(result)
                 return
             self._progress(
-                f"#{result.issue.number}: approved, preparing local review branch"
+                f"{label}: approved, preparing local review branch"
             )
             try:
                 result.branch = await self._prepare_review_branch(result)
             except Exception as exc:
                 result.error = f"Approved, but failed to prepare review branch: {exc}"
-                self._progress(f"#{result.issue.number}: {result.error}")
+                self._progress(f"{label}: {result.error}")
         self.reporter.log_result(result)
 
     async def _push_draft_pr(self, result: SolveResult):
@@ -278,7 +321,7 @@ class Orchestrator:
             human_note=note,
             draft=True,
             log=lambda msg: self._progress(
-                f"#{result.issue.number}: pr: {msg}"
+                f"{_issue_label(result.issue)}: pr: {msg}"
             ),
         )
 
@@ -421,7 +464,11 @@ class Orchestrator:
         profile = get_profile(job.repo)
         job_dir = f"{backend.workspace}/jobs/{result.job_id}"
         worktree = f"{job_dir}/{profile.dir_name}"
-        branch = f"ptq/{result.issue.number}"
+        branch = (
+            f"ptq/{result.issue.number}"
+            if result.issue.number > 0
+            else f"ptq/{result.job_id}"
+        )
         quoted_branch = shlex.quote(branch)
         quoted_worktree = shlex.quote(worktree)
         checkout = await asyncio.to_thread(
@@ -445,19 +492,20 @@ class Orchestrator:
             local=self.config.local,
         )
         existing_job_id = self._existing_job_id(issue)
-        if existing_job_id:
+        if existing_job_id and issue.number > 0:
             from ptq.application.pr_service import sync_existing_pr_branch
 
             await asyncio.to_thread(
                 sync_existing_pr_branch,
                 self.job_repo,
                 existing_job_id,
-                log=lambda msg: self._progress(f"#{issue.number}: pr: {msg}"),
+                log=lambda msg: self._progress(f"{_issue_label(issue)}: pr: {msg}"),
             )
         review_feedback_json = _combined_review_feedback(review, pr_feedback)
+        is_adhoc = issue.number <= 0
         request = RunRequest(
-            issue_data=issue.raw,
-            issue_number=issue.number,
+            issue_data=None if is_adhoc else issue.raw,
+            issue_number=None if is_adhoc else issue.number,
             message=self.config.initial_message,
             machine=None if self.config.local else self.config.machine,
             local=self.config.local,
@@ -466,8 +514,8 @@ class Orchestrator:
             thinking=self.config.solver_thinking,
             max_turns=self.config.solver_max_turns,
             agent_type=self.config.solver_agent,
-            existing_job_id=existing_job_id,
-            name=f"orchestrator-{issue.number}",
+            existing_job_id=None if is_adhoc else existing_job_id,
+            name="orchestrator-adhoc" if is_adhoc else f"orchestrator-{issue.number}",
             repo=self.config.repo,
             review_feedback_json=review_feedback_json,
         )
@@ -482,13 +530,15 @@ class Orchestrator:
             backend,
             request,
             on_progress=lambda msg: self._progress(
-                f"#{issue.number}: solver setup: {msg}"
+                f"{_issue_label(issue)}: solver setup: {msg}"
             ),
         )
         self._job_launch_times[job_id] = launched_after
         return job_id
 
     def _existing_job_id(self, issue: Issue) -> str | None:
+        if issue.number <= 0:
+            return None
         return self.job_repo.find_by_issue(
             issue.number,
             machine=None if self.config.local else self.config.machine,
@@ -501,6 +551,8 @@ class Orchestrator:
         return self.config.log_path.parent / "review_modes.json"
 
     def _review_mode_key(self, issue: Issue) -> str:
+        if issue.number <= 0:
+            return f"{self.config.repo}:adhoc"
         return f"{self.config.repo}:{issue.number}"
 
     def _full_review_mode(self, issue: Issue) -> bool:
@@ -532,6 +584,8 @@ class Orchestrator:
         path.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n")
 
     async def _fetch_pr_feedback(self, issue: Issue) -> dict | None:
+        if issue.number <= 0:
+            return None
         existing_job_id = self._existing_job_id(issue)
         if not existing_job_id:
             return None
@@ -699,11 +753,20 @@ class Orchestrator:
             )
         repro_filename = str(status_json.get("repro_file") or "")
         if not repro_filename:
-            for candidate in (
-                f"repro_{issue.number}.py",
-                f"repro_{issue.number}_generated.py",
-                "repro.py",
-            ):
+            candidates = (
+                (
+                    "repro_adhoc.py",
+                    "repro_adhoc_generated.py",
+                    "repro.py",
+                )
+                if issue.number <= 0
+                else (
+                    f"repro_{issue.number}.py",
+                    f"repro_{issue.number}_generated.py",
+                    "repro.py",
+                )
+            )
+            for candidate in candidates:
                 if await self._remote_exists(backend, f"{job_dir}/{candidate}"):
                     repro_filename = candidate
                     break
@@ -947,13 +1010,22 @@ def _format_pr_feedback_snapshot(issue: Issue, feedback: dict) -> str:
 
 
 def _build_orchestrator_pr_note(result: SolveResult) -> str:
+    subject = (
+        f"Issue: #{result.issue.number} {result.issue.title}"
+        if result.issue.number > 0
+        else f"Task: {result.issue.title}"
+    )
     lines = [
         "Automated draft PR generated by ptq after solver and evaluator approval.",
         "",
-        f"Issue: #{result.issue.number} {result.issue.title}",
+        subject,
         f"Evaluator score: {result.score:.2f}",
     ]
     return "\n".join(lines)
+
+
+def _issue_label(issue: Issue) -> str:
+    return f"#{issue.number}" if issue.number > 0 else "adhoc"
 
 
 def _one_line(text: str, limit: int) -> str:

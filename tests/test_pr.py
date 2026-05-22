@@ -464,11 +464,82 @@ class TestCreatePr:
         assert result.url == "https://github.com/pytorch/pytorch/pull/77"
         commands = [call.args[0] for call in backend.run.call_args_list]
         fetch_idx = next(
-            i for i, cmd in enumerate(commands) if "fetch --no-recurse-submodules origin ptq/42" in cmd
+            i
+            for i, cmd in enumerate(commands)
+            if "fetch --no-recurse-submodules origin ptq/42" in cmd
         )
         add_idx = next(i for i, cmd in enumerate(commands) if "git add -A" in cmd)
         assert fetch_idx < add_idx
         assert any("git stash pop" in cmd for cmd in commands)
+
+    def test_pushes_pytorch_pr_when_support_worktree_has_only_fix(self, tmp_path):
+        repo = JobRepository(tmp_path / "jobs.json")
+        repo.save(
+            JobRecord(
+                job_id="20260520-torchtitan-3409",
+                issue=3409,
+                machine="gpu-dev",
+                workspace="~/ptq_workspace",
+                repo="torchtitan",
+                pr_url="https://github.com/pytorch/torchtitan/pull/3421",
+            )
+        )
+        backend = MagicMock()
+        backend.workspace = "~/ptq_workspace"
+
+        def run_side_effect(cmd, check=True):
+            if (
+                "cat ~/ptq_workspace/jobs/20260520-torchtitan-3409/pytorch-fix.diff"
+                in cmd
+            ):
+                return CompletedProcess(
+                    "",
+                    0,
+                    "diff --git a/torch/foo.py b/torch/foo.py",
+                    "",
+                )
+            if "cat ~/ptq_workspace/jobs/20260520-torchtitan-3409/report.md" in cmd:
+                return CompletedProcess("", 0, "## Summary\nFix is in PyTorch.", "")
+            if "cat ~/ptq_workspace/jobs/20260520-torchtitan-3409/status.json" in cmd:
+                return CompletedProcess(
+                    "", 0, '{"pr_title": "Fix local tensor op"}', ""
+                )
+            if "cat ~/ptq_workspace/jobs/20260520-torchtitan-3409/" in cmd:
+                return CompletedProcess("", 1, "", "")
+            if (
+                "cd ~/ptq_workspace/jobs/20260520-torchtitan-3409/torchtitan"
+                in cmd
+                and "git status --porcelain" in cmd
+            ):
+                return CompletedProcess("", 0, "", "")
+            if "git ls-remote --exit-code --heads origin ptq/torchtitan-3409" in cmd:
+                return CompletedProcess("", 1, "", "")
+            if "git remote get-url" in cmd:
+                return CompletedProcess("", 0, "git@github.com:pytorch/pytorch.git\n")
+            if "git diff --cached --quiet" in cmd:
+                return CompletedProcess("", 1, "", "")
+            if "gh pr create" in cmd:
+                return CompletedProcess(
+                    "", 0, "https://github.com/pytorch/pytorch/pull/185000\n", ""
+                )
+            return CompletedProcess("", 0, "")
+
+        backend.run = MagicMock(side_effect=run_side_effect)
+        with patch("ptq.application.pr_service.backend_for_job", return_value=backend):
+            result = create_pr(repo, "20260520-torchtitan-3409", human_note="Fix")
+
+        assert result.url == "https://github.com/pytorch/pytorch/pull/185000"
+        assert result.branch == "ptq/torchtitan-3409"
+        commands = [call.args[0] for call in backend.run.call_args_list]
+        assert any(
+            "cd ~/ptq_workspace/jobs/20260520-torchtitan-3409/pytorch"
+            in cmd
+            and "git checkout -B ptq/torchtitan-3409" in cmd
+            for cmd in commands
+        )
+        create_cmd = next(cmd for cmd in commands if "gh pr create" in cmd)
+        assert "Fixes pytorch/torchtitan#3409" in create_cmd
+        assert "pytorch/torchtitan/pull/3421" not in create_cmd
 
     def test_closed_saved_pr_creates_new_pr(self, tmp_path):
         repo, backend = self._setup(tmp_path)
@@ -585,7 +656,10 @@ class TestCreatePr:
 
         commands = [call.args[0] for call in backend.run.call_args_list]
         assert push_attempts == 2
-        assert any("fetch --no-recurse-submodules origin ptq/42" in cmd for cmd in commands)
+        assert any(
+            "fetch --no-recurse-submodules origin ptq/42" in cmd
+            for cmd in commands
+        )
         assert any("git rebase FETCH_HEAD" in cmd for cmd in commands)
 
     def test_pr_create_is_always_draft(self, tmp_path):
@@ -901,7 +975,10 @@ class TestCreatePr:
         assert pr_url == "https://github.com/pytorch/pytorch/pull/88"
         assert repo.get("20260217-42").pr_url == pr_url
         commands = [call.args[0] for call in backend.run.call_args_list]
-        assert any("fetch --no-recurse-submodules origin ptq/42" in cmd for cmd in commands)
+        assert any(
+            "fetch --no-recurse-submodules origin ptq/42" in cmd
+            for cmd in commands
+        )
         assert any("git rebase FETCH_HEAD" in cmd for cmd in commands)
 
     def test_replies_to_resolved_pr_comments_with_bot_prefix(self, tmp_path):

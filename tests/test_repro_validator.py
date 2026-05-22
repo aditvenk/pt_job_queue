@@ -25,3 +25,14 @@ def test_missing_repro_blocks_evaluation():
     )
     assert check.blocks_evaluation is True
     assert check.comments[0].severity == "blocking"
+
+
+def test_adhoc_not_applicable_repro_does_not_block():
+    check = validate_repro_presence(
+        issue_number=0,
+        repro_filename="",
+        repro_script="",
+        status_json={"repro_source": "not_applicable"},
+    )
+    assert check.blocks_evaluation is False
+    assert check.source == "not_applicable"
